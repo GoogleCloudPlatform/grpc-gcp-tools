@@ -1,5 +1,6 @@
 ## To generate a release for a tool
 
+```
 ./release.sh <TOOL_NAME>
 ```
 
