@@ -16,10 +16,7 @@ build_dp_check() {
   file dp_check | grep 'statically linked'
   if [ $? != 0 ]; then
     echo "dp_check binary is not statically linked"
-  else
-    zip dp_check.zip dp_check
   fi
-  rm -f dp_check
 }
 
 eval "build_$1"
