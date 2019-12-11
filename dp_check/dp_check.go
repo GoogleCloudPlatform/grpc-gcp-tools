@@ -22,12 +22,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -42,10 +48,22 @@ var (
 	service      = flag.String("service", "", "The public DirectPath-enabled DNS of the service to check")
 	infoLog      = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 	failureCount int
+	runningOS    = runtime.GOOS
 )
 
+type platformError string
+
+func (k platformError) Error() string {
+	return fmt.Sprintf("%s is not supported", string(k))
+}
+
 const (
-	loadBalancerDNS = "grpclb.directpath.google.internal."
+	loadBalancerDNS          = "grpclb.directpath.google.internal."
+	linuxProductNameFile     = "/sys/class/dmi/id/product_name"
+	windowsManufacturerRegex = ":(.*)"
+	windowsCheckCommand      = "powershell.exe"
+	windowsCheckCommandArgs  = "Get-WmiObject -Class Win32_BIOS"
+	powershellOutputFilter   = "Manufacturer"
 )
 
 func cmd(command string) (string, error) {
@@ -124,6 +142,73 @@ func getBackendAddrsFromGrpclb(lbAddr string) ([]string, error) {
 	}
 }
 
+func manufacturerReader() (io.Reader, error) {
+	switch runningOS {
+	case "linux":
+		return os.Open(linuxProductNameFile)
+	case "windows":
+		cmd := exec.Command(windowsCheckCommand, windowsCheckCommandArgs)
+		out, err := cmd.Output()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+			if strings.HasPrefix(line, powershellOutputFilter) {
+				re := regexp.MustCompile(windowsManufacturerRegex)
+				name := re.FindString(line)
+				name = strings.TrimLeft(name, ":")
+				return strings.NewReader(name), nil
+			}
+		}
+
+		return nil, errors.New("cannot determine the machine's manufacturer")
+	default:
+		return nil, platformError(runningOS)
+	}
+}
+
+func readManufacturer() ([]byte, error) {
+	reader, err := manufacturerReader()
+	if err != nil {
+		return nil, err
+	}
+	if reader == nil {
+		return nil, errors.New("got nil reader")
+	}
+	manufacturer, err := ioutil.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading %v: %v", linuxProductNameFile, err)
+	}
+	return manufacturer, nil
+}
+
+// isRunningOnGCP checks whether the local system, without doing a network request is
+// running on GCP.
+func isRunningOnGCP() bool {
+	manufacturer, err := readManufacturer()
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		log.Fatalf("failure to read manufacturer information: %v", err)
+	}
+	name := string(manufacturer)
+	switch runtime.GOOS {
+	case "linux":
+		name = strings.TrimSpace(name)
+		return name == "Google" || name == "Google Compute Engine"
+	case "windows":
+		name = strings.Replace(name, " ", "", -1)
+		name = strings.Replace(name, "\n", "", -1)
+		name = strings.Replace(name, "\r", "", -1)
+		return name == "Google"
+	default:
+		infoLog.Fatal(platformError(runtime.GOOS))
+	}
+	return false
+}
+
 func runCheck(name string, check func() error) {
 	if err := check(); err != nil {
 		fmt.Printf("\x1b[1m%v: \x1b[31mFAILED. Error: %v\x1b[0m\n", name, err)
@@ -142,6 +227,35 @@ func main() {
 	if syscall.Getuid() != 0 {
 		infoLog.Println("Not running as root, some checks may fail.")
 	}
+
+	// Check if dp_check is running on a VM
+	runCheck("Running on GCE VM", func() error {
+		if !isRunningOnGCP() {
+			return fmt.Errorf(`dp_check is not running on a GCE VM`)
+		}
+		return nil
+	})
+
+	// Check connection to metadata server
+	runCheck("HTTP connectivity to metadata server", func() error {
+		client := &http.Client{}
+		metadataServerUrl := "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ipv6s"
+		req, err := http.NewRequest("GET", metadataServerUrl, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Add("Metadata-Flavor", "Google")
+		resp, err := client.Do(req)
+		infoLog.Printf("Check connection to metadata server by sending http GET request to %s", metadataServerUrl)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != 200 {
+			return fmt.Errorf(`Connecting to metadata server failed. Either this VM doesn't have DirectPath access, or there is a bug that may be causing a larger outage`)
+		}
+		return nil
+	})
+
 	// Check IPv6
 	runCheck("IPv6 routes", func() error {
 		var out string
