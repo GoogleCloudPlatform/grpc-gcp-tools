@@ -38,6 +38,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vishvananda/netlink"
 	"google.golang.org/grpc"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 	"google.golang.org/grpc/connectivity"
@@ -45,10 +46,12 @@ import (
 )
 
 var (
-	service      = flag.String("service", "", "The public DirectPath-enabled DNS of the service to check")
-	infoLog      = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
-	failureCount int
-	runningOS    = runtime.GOOS
+	service                = flag.String("service", "", "The public DirectPath-enabled DNS of the service to check")
+	infoLog                = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+	failureCount           int
+	runningOS              = runtime.GOOS
+	IPv6FromMetadataServer net.IP
+	eth0                   net.Interface
 )
 
 type platformError string
@@ -70,15 +73,6 @@ func cmd(command string) (string, error) {
 	c := strings.Split(command, " ")
 	out, err := exec.Command(c[0], c[1:]...).Output()
 	return string(out), err
-}
-
-func getOutput(command string) (string, error) {
-	var out string
-	var err error
-	if out, err = cmd(command); err != nil {
-		return "", fmt.Errorf("Command:|%v| FAILED. Error:%v", command, err)
-	}
-	return string(out), nil
 }
 
 func getBackendAddrsFromGrpclb(lbAddr string) ([]string, error) {
@@ -185,28 +179,43 @@ func readManufacturer() ([]byte, error) {
 
 // isRunningOnGCP checks whether the local system, without doing a network request is
 // running on GCP.
-func isRunningOnGCP() bool {
+func isRunningOnGCP() (bool, error) {
 	manufacturer, err := readManufacturer()
 	if os.IsNotExist(err) {
-		return false
+		return false, err
 	}
 	if err != nil {
-		log.Fatalf("failure to read manufacturer information: %v", err)
+		return false, fmt.Errorf("failure to read manufacturer information: %v", err)
 	}
 	name := string(manufacturer)
 	switch runtime.GOOS {
 	case "linux":
 		name = strings.TrimSpace(name)
-		return name == "Google" || name == "Google Compute Engine"
+		return name == "Google" || name == "Google Compute Engine", nil
 	case "windows":
 		name = strings.Replace(name, " ", "", -1)
 		name = strings.Replace(name, "\n", "", -1)
 		name = strings.Replace(name, "\r", "", -1)
-		return name == "Google"
+		return name == "Google", nil
 	default:
-		infoLog.Fatal(platformError(runtime.GOOS))
+		return false, platformError(runtime.GOOS)
 	}
-	return false
+	return false, nil
+}
+
+// hasRouteToLb checks if there is ip route from the current VM to the lb backends
+func hasRouteToLb() (bool, error) {
+	link, err := netlink.LinkByName(eth0.Name)
+	if err != nil {
+		return false, err
+	}
+	rl, err := netlink.RouteList(link, netlink.FAMILY_V6)
+	for _, r := range rl {
+		if strings.Contains(r.Dst.String(), "2001:4860:8040::/42") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func runCheck(name string, check func() error) {
@@ -230,14 +239,18 @@ func main() {
 
 	// Check if dp_check is running on a VM
 	runCheck("Running on GCE VM", func() error {
-		if !isRunningOnGCP() {
-			return fmt.Errorf(`dp_check is not running on a GCE VM`)
+		ret, err := isRunningOnGCP()
+		if err != nil {
+			return err
+		}
+		if !ret {
+			return fmt.Errorf("dp_check is not running on a GCE VM, this tool will not work as intended")
 		}
 		return nil
 	})
 
 	// Check connection to metadata server
-	runCheck("HTTP connectivity to metadata server", func() error {
+	runCheck("DirectPath availability", func() error {
 		client := &http.Client{}
 		metadataServerUrl := "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ipv6s"
 		req, err := http.NewRequest("GET", metadataServerUrl, nil)
@@ -246,41 +259,72 @@ func main() {
 		}
 		req.Header.Add("Metadata-Flavor", "Google")
 		resp, err := client.Do(req)
-		infoLog.Printf("Check connection to metadata server by sending http GET request to %s", metadataServerUrl)
 		if err != nil {
 			return err
 		}
-		if resp.StatusCode != 200 {
-			return fmt.Errorf(`Connecting to metadata server failed. Either this VM doesn't have DirectPath access, or there is a bug that may be causing a larger outage`)
+		defer resp.Body.Close()
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return err
 		}
-		return nil
+		IPv6FromMetadataServer = net.ParseIP(strings.TrimSuffix(string(body), "\n"))
+
+		infoLog.Printf("Check if this VM enables DirectPath by sending http GET request to %s", metadataServerUrl)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == 200 {
+			return nil
+		}
+		if resp.StatusCode == 404 {
+			return fmt.Errorf("This VM doesn't have DirectPath access")
+		}
+		return fmt.Errorf("Connecting to metadata server failed. There may be a bug that may be causing a larger outage")
 	})
 
-	// Check IPv6
-	runCheck("IPv6 routes", func() error {
-		var out string
-		var err error
-		cmd := "ip -6 route show"
-		infoLog.Printf("Check IPv6 routes with:|%v|...\n", cmd)
-		if out, err = getOutput(cmd); err != nil {
+	runCheck("IPv6 addresses", func() error {
+		ifaces, err := net.Interfaces()
+		if err != nil {
 			return err
 		}
-		if !strings.Contains(out, "2001:4860:8040::/42") {
+		// Go through all interfaces on the VM to see if IPv6 is enabled and if there is an IPv6 address, then check against the IPv6 address returned from metadataserver
+		var hasIPv6 bool
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			if iface.Flags&net.FlagUp != net.FlagUp {
+				continue
+			}
+			ifaddrs, err := iface.Addrs()
+			if err != nil {
+				return err
+			}
+			for _, ifaddr := range ifaddrs {
+				ip := ifaddr.(*net.IPNet).IP
+				if ip.To4() == nil {
+					hasIPv6 = true
+					if ip.Equal(IPv6FromMetadataServer) {
+						eth0 = iface
+						return nil
+					}
+				}
+			}
+		}
+		if !hasIPv6 {
+			return fmt.Errorf("This VM is missing a global 2600-prefixed IPv6 address. IPv6 DHCP setup either failed or hasn't been attempted")
+		}
+		return fmt.Errorf("IPv6 address does not match what metadata server returns")
+	})
+
+	runCheck("IPv6 routes", func() error {
+		hasRoute, err := hasRouteToLb()
+		if err != nil {
+			return err
+		}
+		if !hasRoute {
 			return fmt.Errorf(`Missing route prefix to backends: 2001:4860:8040::/42.
 IPv6 route setup either failed or hasn't been attempted`)
-		}
-		return nil
-	})
-	runCheck("IPv6 addresses", func() error {
-		var out string
-		var err error
-		cmd := "ip -6 addr show"
-		infoLog.Printf("Check IPv6 addresses with:|%v|...\n", cmd)
-		if out, err = getOutput(cmd); err != nil {
-			return err
-		}
-		if !strings.Contains(out, "inet6 2600") {
-			return fmt.Errorf("This VM is missing a global 2600-prefixed IPv6 address. IPv6 DHCP setup either failed or hasn't been attempted")
 		}
 		return nil
 	})
