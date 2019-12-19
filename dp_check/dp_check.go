@@ -200,9 +200,8 @@ func isRunningOnGCP() (bool, error) {
 	return false, nil
 }
 
-// hasDirectPathIPv6Route checks if there is ip route from the current VM to the lb backends
 func hasDirectPathIPv6Route(iface net.Interface) (bool, error) {
-	infoLog.Printf("Check all IPv6 routes on network interface |Name: %s, hardware address: %s, flags: %s| returned by |netlink.LinkByName()|", iface.Name, iface.HardwareAddr, iface.Flags)
+	infoLog.Printf("Check all IPv6 routes on network interface |Name: %s, hardware address: %s, flags: %s| returned by |netlink.LinkByName(%s)|", iface.Name, iface.HardwareAddr, iface.Flags, iface.Name)
 	link, err := netlink.LinkByName(iface.Name)
 	if err != nil {
 		return false, err
@@ -248,11 +247,10 @@ func main() {
 		return nil
 	})
 
-	// Check connection to metadata server
 	runCheck("DirectPath enablement", func() error {
 		client := &http.Client{}
 		metadataServerUrl := "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ipv6s"
-		infoLog.Println("Check if this VM enables DirectPath by sending http GET request to", metadataServerUrl)
+		infoLog.Println("Check if DirectPath is enabled for this VM by sending http GET request to", metadataServerUrl)
 		req, err := http.NewRequest("GET", metadataServerUrl, nil)
 		if err != nil {
 			return err
@@ -306,7 +304,7 @@ func main() {
 			}
 			for _, ifaddr := range ifaddrs {
 				ip := ifaddr.(*net.IPNet).IP
-				infoLog.Printf("Found ip address %s when checking network interface |%s|", ip.String(), iface.Name)
+				infoLog.Printf("Found ip address |%s| when checking network interface |%s|", ip.String(), iface.Name)
 				if ip.To4() == nil && ip.Equal(ipv6FromMetadataServer) {
 					directPathNetworkInterface = iface
 					break
@@ -316,7 +314,6 @@ func main() {
 				break
 			}
 		}
-		// There is IPv6 address on the machine but it does not match what metadata server returns
 		if directPathNetworkInterface.Name == "" {
 			return fmt.Errorf("This VM was expected to have a network interface with IPv6 address: %s assigned to it, but no such interface was found, IPv6 DHCP setup either failed or hasn't been attempted", ipv6FromMetadataServer)
 		}
