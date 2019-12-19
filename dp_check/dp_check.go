@@ -236,7 +236,7 @@ func main() {
 		infoLog.Println("Not running as root, some checks may fail.")
 	}
 
-	// Check if dp_check is running on a VM
+	// Check if dp_check is running on GCP
 	runCheck("Running on GCP", func() error {
 		ret, err := isRunningOnGCP()
 		if err != nil {
