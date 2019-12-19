@@ -202,12 +202,14 @@ func isRunningOnGCP() (bool, error) {
 
 // hasDirectPathIPv6Route checks if there is ip route from the current VM to the lb backends
 func hasDirectPathIPv6Route(iface net.Interface) (bool, error) {
+	infoLog.Printf("Check all IPv6 routes on network interface |Name: %s, hardware address: %s, flags: %s| returned by |netlink.LinkByName()|", iface.Name, iface.HardwareAddr, iface.Flags)
 	link, err := netlink.LinkByName(iface.Name)
 	if err != nil {
 		return false, err
 	}
 	rl, err := netlink.RouteList(link, netlink.FAMILY_V6)
 	for _, r := range rl {
+		infoLog.Printf("Found IPv6 route: |%s| on network interface |%s|", r, iface.Name)
 		if strings.Contains(r.Dst.String(), "2001:4860:8040::/42") {
 			return true, nil
 		}
@@ -250,7 +252,7 @@ func main() {
 	runCheck("DirectPath enablement", func() error {
 		client := &http.Client{}
 		metadataServerUrl := "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ipv6s"
-		infoLog.Printf("Check if this VM enables DirectPath by sending http GET request to %s", metadataServerUrl)
+		infoLog.Println("Check if this VM enables DirectPath by sending http GET request to", metadataServerUrl)
 		req, err := http.NewRequest("GET", metadataServerUrl, nil)
 		if err != nil {
 			return err
@@ -265,11 +267,12 @@ func main() {
 		if err != nil {
 			return err
 		}
-		ipv6FromMetadataServer = net.ParseIP(strings.TrimSuffix(string(body), "\n"))
 		if err != nil {
 			return err
 		}
 		if resp.StatusCode == 200 {
+			ipv6FromMetadataServer = net.ParseIP(strings.TrimSuffix(string(body), "\n"))
+			infoLog.Printf("Received IPv6 address %s from metadata server", ipv6FromMetadataServer)
 			return nil
 		}
 		if resp.StatusCode == 404 {
@@ -280,6 +283,7 @@ func main() {
 
 	var directPathNetworkInterface net.Interface
 	runCheck("IPv6 addresses", func() error {
+		infoLog.Println("Check IPv6 address by iterating over all ip addresses from interfaces returned by: |net.Interfaces()|")
 		if ipv6FromMetadataServer == nil {
 			return fmt.Errorf("Skipping IPv6 addresses check because the VM failed to get a valid IPv6 address from metadata server")
 		}
@@ -295,13 +299,14 @@ func main() {
 			if iface.Flags&net.FlagUp != net.FlagUp {
 				continue
 			}
-			infoLog.Printf("Checking non-loopback and up network interface: |Name: %s, hardware address: %s, flags: %s\n", iface.Name, iface.HardwareAddr, iface.Flags)
+			infoLog.Printf("Checking non-loopback and up network interface: |Name: %s, hardware address: %s, flags: %s|", iface.Name, iface.HardwareAddr, iface.Flags)
 			ifaddrs, err := iface.Addrs()
 			if err != nil {
 				return err
 			}
 			for _, ifaddr := range ifaddrs {
 				ip := ifaddr.(*net.IPNet).IP
+				infoLog.Printf("Found ip address %s when checking network interface |%s|", ip.String(), iface.Name)
 				if ip.To4() == nil && ip.Equal(ipv6FromMetadataServer) {
 					directPathNetworkInterface = iface
 					break
@@ -315,12 +320,11 @@ func main() {
 		if directPathNetworkInterface.Name == "" {
 			return fmt.Errorf("This VM was expected to have a network interface with IPv6 address: %s assigned to it, but no such interface was found, IPv6 DHCP setup either failed or hasn't been attempted", ipv6FromMetadataServer)
 		}
-		infoLog.Printf("Found the valid directpath network interface %s with hardware address |%s| and flag %s\n", directPathNetworkInterface.Name, directPathNetworkInterface.HardwareAddr, directPathNetworkInterface.Flags)
+		infoLog.Printf("Found the valid directpath network interface %s with hardware address |%s| and flags %s", directPathNetworkInterface.Name, directPathNetworkInterface.HardwareAddr, directPathNetworkInterface.Flags)
 		return nil
 	})
 
 	runCheck("IPv6 routes", func() error {
-		// Check if there is route to the gRPCLB
 		if directPathNetworkInterface.Name == "" {
 			return fmt.Errorf("Skipping IPv6 routes check because there is no valid directpath network interface on this machine")
 		}
@@ -339,19 +343,19 @@ IPv6 route setup either failed or hasn't been attempted`)
 	runCheck("Load balancer AAAA DNS queries", func() error {
 		var addrs []string
 		var err error
-		infoLog.Printf("Resolve LB addrs with:|net.LookupHost(\"%v\")|...\n", loadBalancerDNS)
+		infoLog.Printf("Resolve LB addrs with:|net.LookupHost(\"%v\")|...", loadBalancerDNS)
 		if addrs, err = net.LookupHost(loadBalancerDNS); len(addrs) == 0 || err != nil {
 			return fmt.Errorf(`Load balancer DNS resolution failed: %v.
 Either this VM doesn't have DirectPath access, or there is a bug that may be causing a larger outage`, err)
 		}
 		for _, addr := range addrs {
-			infoLog.Printf("Resolved LB addr: %v\n", addr)
+			infoLog.Printf("Resolved LB addr: %v", addr)
 		}
 		return nil
 	})
 	var balancerAddr string
 	runCheck("Service SRV DNS queries", func() error {
-		infoLog.Printf("Lookup service SRV records with:|net.DefaultResolver.LoookupSRV(context.Background(), \"grpclb\", \"tcp\", \"%v\")|...\n", *service)
+		infoLog.Printf("Lookup service SRV records with:|net.DefaultResolver.LoookupSRV(context.Background(), \"grpclb\", \"tcp\", \"%v\")|...", *service)
 		_, srvs, err := net.DefaultResolver.LookupSRV(context.Background(), "grpclb", "tcp", *service)
 		if err != nil || len(srvs) == 0 {
 			return fmt.Errorf(`SRV record resolution for _grpclb._tcp.%s failed with error:|%v|.
@@ -373,7 +377,7 @@ The most likely reason for this is that %s is not a DirectPath-enabled service`,
 		if len(balancerAddr) == 0 {
 			return fmt.Errorf("Skipping TCP connectivity to load balancers because load balancer DNS resolution failed")
 		}
-		infoLog.Printf("Check TCP connectivity to LB's with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...\n", balancerAddr)
+		infoLog.Printf("Check TCP connectivity to LB's with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", balancerAddr)
 		if _, err := net.DialTimeout("tcp", balancerAddr, time.Second*5); err != nil {
 			return fmt.Errorf("TCP connectivity to the load balancer failed: %v. This may be a transient error specific to the load balancer at %v", err, balancerAddr)
 		}
@@ -386,7 +390,7 @@ The most likely reason for this is that %s is not a DirectPath-enabled service`,
 			return fmt.Errorf("Skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
 		}
 		var err error
-		infoLog.Printf("Find backend addresses for %v by making a \"BalanceLoad\" RPC to the load balancers...\n", *service)
+		infoLog.Printf("Find backend addresses for %v by making a \"BalanceLoad\" RPC to the load balancers...", *service)
 		if backendAddrs, err = getBackendAddrsFromGrpclb(balancerAddr); err != nil {
 			return fmt.Errorf(`Failed to get any backend VIPs from the load balancer because: %v.
 Consider running this binary under environment variables:
@@ -395,7 +399,7 @@ Consider running this binary under environment variables:
 in order to get more debug logs from the grpc library (which was just used when reaching out to the load balancer)`, err)
 		}
 		for _, addr := range backendAddrs {
-			infoLog.Printf("Found backend address:|%v|\n", addr)
+			infoLog.Printf("Found backend address:|%v|", addr)
 		}
 		return nil
 	})
@@ -406,7 +410,7 @@ in order to get more debug logs from the grpc library (which was just used when 
 		if len(backendAddrs) == 0 {
 			return fmt.Errorf("Skipping TCP connectivity to backends because discovery of backends failed")
 		}
-		infoLog.Printf("Check TCP connectivity to backends with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...\n", backendAddrs[0])
+		infoLog.Printf("Check TCP connectivity to backends with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", backendAddrs[0])
 		if _, err := net.DialTimeout("tcp", backendAddrs[0], time.Second*5); err != nil {
 			return fmt.Errorf("TCP connectivity to backend addr - %v failed: %v", backendAddrs[0], err)
 		}
@@ -417,7 +421,7 @@ in order to get more debug logs from the grpc library (which was just used when 
 		if !tcpConnectivitySucceeded {
 			return fmt.Errorf("Skipping secure connectivity to backends because TCP connectivity to backends did not succeed")
 		}
-		infoLog.Printf("Check secure connectivity to backends by attempting to complete all handshakes involved in the setup of a gRPC/ALTS connection to %v", backendAddrs[0])
+		infoLog.Println("Check secure connectivity to backends by attempting to complete all handshakes involved in the setup of a gRPC/ALTS connection to", backendAddrs[0])
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		altsCreds := alts.NewClientCreds(alts.DefaultClientOptions())
