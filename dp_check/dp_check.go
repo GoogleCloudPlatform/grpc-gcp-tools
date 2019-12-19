@@ -202,8 +202,8 @@ func isRunningOnGCP() (bool, error) {
 	return false, nil
 }
 
-// hasRouteToLb checks if there is ip route from the current VM to the lb backends
-func hasRouteToLb(iface net.Interface) (bool, error) {
+// hasDirectPathIPv6Route checks if there is ip route from the current VM to the lb backends
+func hasDirectPathIPv6Route(iface net.Interface) (bool, error) {
 	link, err := netlink.LinkByName(iface.Name)
 	if err != nil {
 		return false, err
@@ -237,21 +237,22 @@ func main() {
 	}
 
 	// Check if dp_check is running on a VM
-	runCheck("Running on GCE VM", func() error {
+	runCheck("Running on GCP", func() error {
 		ret, err := isRunningOnGCP()
 		if err != nil {
 			return err
 		}
 		if !ret {
-			return fmt.Errorf("dp_check is not running on a GCE VM, this tool will not work as intended")
+			return fmt.Errorf("dp_check is not running on GCP, this tool will not work as intended")
 		}
 		return nil
 	})
 
 	// Check connection to metadata server
-	runCheck("DirectPath availability", func() error {
+	runCheck("DirectPath enablement", func() error {
 		client := &http.Client{}
 		metadataServerUrl := "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ipv6s"
+		infoLog.Printf("Check if this VM enables DirectPath by sending http GET request to %s", metadataServerUrl)
 		req, err := http.NewRequest("GET", metadataServerUrl, nil)
 		if err != nil {
 			return err
@@ -267,8 +268,6 @@ func main() {
 			return err
 		}
 		ipv6FromMetadataServer = net.ParseIP(strings.TrimSuffix(string(body), "\n"))
-
-		infoLog.Printf("Check if this VM enables DirectPath by sending http GET request to %s", metadataServerUrl)
 		if err != nil {
 			return err
 		}
@@ -278,7 +277,7 @@ func main() {
 		if resp.StatusCode == 404 {
 			return fmt.Errorf("This VM doesn't have DirectPath access")
 		}
-		return fmt.Errorf("Connecting to metadata server failed. There may be a bug that may be causing a larger outage")
+		return fmt.Errorf("Received status code %d in response to metadata server GET request to URL: %s. This is unexpected (we only expect status codes 200 or 404), and so this may indicate a bug", resp.StatusCode, metadataServerUrl)
 	})
 
 	runCheck("IPv6 addresses and routes", func() error {
@@ -288,7 +287,6 @@ func main() {
 		}
 		// Go through all interfaces on the VM to see if IPv6 is enabled and if there is an IPv6 address, then check against the IPv6 address returned from metadataserver
 		var directPathNetworkInterface net.Interface
-		var ipv6Enabled bool
 		for _, iface := range ifaces {
 			if iface.Flags&net.FlagLoopback != 0 {
 				continue
@@ -302,11 +300,7 @@ func main() {
 			}
 			for _, ifaddr := range ifaddrs {
 				ip := ifaddr.(*net.IPNet).IP
-				if ip.To4() != nil {
-					continue
-				}
-				ipv6Enabled = true
-				if ip.Equal(ipv6FromMetadataServer) {
+				if ip.To4() == nil && ip.Equal(ipv6FromMetadataServer) {
 					directPathNetworkInterface = iface
 					break
 				}
@@ -315,16 +309,13 @@ func main() {
 				break
 			}
 		}
-		if !ipv6Enabled {
-			return fmt.Errorf("This VM is missing a global 2600-prefixed IPv6 address. IPv6 DHCP setup either failed or hasn't been attempted")
-		}
 		// There is IPv6 address on the machine but it does not match what metadata server returns
 		if directPathNetworkInterface.Name == "" {
-			return fmt.Errorf("This VM was expected to have an network interface with IPv6 address: %s assigned to it, but no such interface was found", ipv6FromMetadataServer)
+			return fmt.Errorf("This VM was expected to have a network interface with IPv6 address: %s assigned to it, but no such interface was found, IPv6 DHCP setup either failed or hasn't been attempted", ipv6FromMetadataServer)
 		}
 		infoLog.Printf("Found the valid network interface %s with hardware address |%s| and flag %s\n", directPathNetworkInterface.Name, directPathNetworkInterface.HardwareAddr, directPathNetworkInterface.Flags)
 		// Check if there is route to the gRPCLB
-		hasRoute, err := hasRouteToLb(directPathNetworkInterface)
+		hasRoute, err := hasDirectPathIPv6Route(directPathNetworkInterface)
 		if err != nil {
 			return err
 		}
