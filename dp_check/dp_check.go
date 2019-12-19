@@ -280,6 +280,9 @@ func main() {
 
 	var directPathNetworkInterface net.Interface
 	runCheck("IPv6 addresses", func() error {
+		if ipv6FromMetadataServer == nil {
+			return fmt.Errorf("Skipping IPv6 addresses check because the VM failed to get a valid IPv6 address from metadata server")
+		}
 		ifaces, err := net.Interfaces()
 		if err != nil {
 			return err
