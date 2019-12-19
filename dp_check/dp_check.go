@@ -145,7 +145,6 @@ func manufacturerReader() (io.Reader, error) {
 		if err != nil {
 			return nil, err
 		}
-
 		for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
 			if strings.HasPrefix(line, powershellOutputFilter) {
 				re := regexp.MustCompile(windowsManufacturerRegex)
@@ -154,7 +153,6 @@ func manufacturerReader() (io.Reader, error) {
 				return strings.NewReader(name), nil
 			}
 		}
-
 		return nil, errors.New("cannot determine the machine's manufacturer")
 	default:
 		return nil, platformError(runningOS)
@@ -280,13 +278,13 @@ func main() {
 		return fmt.Errorf("Received status code %d in response to metadata server GET request to URL: %s. This is unexpected (we only expect status codes 200 or 404), and so this may indicate a bug", resp.StatusCode, metadataServerUrl)
 	})
 
-	runCheck("IPv6 addresses and routes", func() error {
+	var directPathNetworkInterface net.Interface
+	runCheck("IPv6 addresses", func() error {
 		ifaces, err := net.Interfaces()
 		if err != nil {
 			return err
 		}
 		// Go through all interfaces on the VM to see if IPv6 is enabled and if there is an IPv6 address, then check against the IPv6 address returned from metadataserver
-		var directPathNetworkInterface net.Interface
 		for _, iface := range ifaces {
 			if iface.Flags&net.FlagLoopback != 0 {
 				continue
@@ -294,6 +292,7 @@ func main() {
 			if iface.Flags&net.FlagUp != net.FlagUp {
 				continue
 			}
+			infoLog.Printf("Checking non-loopback and up network interface: |Name: %s, hardware address: %s, flags: %s\n", iface.Name, iface.HardwareAddr, iface.Flags)
 			ifaddrs, err := iface.Addrs()
 			if err != nil {
 				return err
@@ -313,8 +312,15 @@ func main() {
 		if directPathNetworkInterface.Name == "" {
 			return fmt.Errorf("This VM was expected to have a network interface with IPv6 address: %s assigned to it, but no such interface was found, IPv6 DHCP setup either failed or hasn't been attempted", ipv6FromMetadataServer)
 		}
-		infoLog.Printf("Found the valid network interface %s with hardware address |%s| and flag %s\n", directPathNetworkInterface.Name, directPathNetworkInterface.HardwareAddr, directPathNetworkInterface.Flags)
+		infoLog.Printf("Found the valid directpath network interface %s with hardware address |%s| and flag %s\n", directPathNetworkInterface.Name, directPathNetworkInterface.HardwareAddr, directPathNetworkInterface.Flags)
+		return nil
+	})
+
+	runCheck("IPv6 routes", func() error {
 		// Check if there is route to the gRPCLB
+		if directPathNetworkInterface.Name == "" {
+			return fmt.Errorf("Skipping IPv6 routes check because there is no valid directpath network interface on this machine")
+		}
 		hasRoute, err := hasDirectPathIPv6Route(directPathNetworkInterface)
 		if err != nil {
 			return err
