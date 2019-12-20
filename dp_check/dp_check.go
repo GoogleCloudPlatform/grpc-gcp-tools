@@ -22,16 +22,23 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/vishvananda/netlink"
 	"google.golang.org/grpc"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 	"google.golang.org/grpc/connectivity"
@@ -39,28 +46,32 @@ import (
 )
 
 var (
-	service      = flag.String("service", "", "The public DirectPath-enabled DNS of the service to check")
-	infoLog      = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
-	failureCount int
+	service                = flag.String("service", "", "The public DirectPath-enabled DNS of the service to check")
+	infoLog                = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+	failureCount           int
+	runningOS              = runtime.GOOS
+	ipv6FromMetadataServer net.IP
 )
 
+type platformError string
+
+func (k platformError) Error() string {
+	return fmt.Sprintf("%s is not supported", string(k))
+}
+
 const (
-	loadBalancerDNS = "grpclb.directpath.google.internal."
+	loadBalancerDNS          = "grpclb.directpath.google.internal."
+	linuxProductNameFile     = "/sys/class/dmi/id/product_name"
+	windowsManufacturerRegex = ":(.*)"
+	windowsCheckCommand      = "powershell.exe"
+	windowsCheckCommandArgs  = "Get-WmiObject -Class Win32_BIOS"
+	powershellOutputFilter   = "Manufacturer"
 )
 
 func cmd(command string) (string, error) {
 	c := strings.Split(command, " ")
 	out, err := exec.Command(c[0], c[1:]...).Output()
 	return string(out), err
-}
-
-func getOutput(command string) (string, error) {
-	var out string
-	var err error
-	if out, err = cmd(command); err != nil {
-		return "", fmt.Errorf("Command:|%v| FAILED. Error:%v", command, err)
-	}
-	return string(out), nil
 }
 
 func getBackendAddrsFromGrpclb(lbAddr string) ([]string, error) {
@@ -124,6 +135,87 @@ func getBackendAddrsFromGrpclb(lbAddr string) ([]string, error) {
 	}
 }
 
+func manufacturerReader() (io.Reader, error) {
+	switch runningOS {
+	case "linux":
+		return os.Open(linuxProductNameFile)
+	case "windows":
+		cmd := exec.Command(windowsCheckCommand, windowsCheckCommandArgs)
+		out, err := cmd.Output()
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+			if strings.HasPrefix(line, powershellOutputFilter) {
+				re := regexp.MustCompile(windowsManufacturerRegex)
+				name := re.FindString(line)
+				name = strings.TrimLeft(name, ":")
+				return strings.NewReader(name), nil
+			}
+		}
+		return nil, errors.New("cannot determine the machine's manufacturer")
+	default:
+		return nil, platformError(runningOS)
+	}
+}
+
+func readManufacturer() ([]byte, error) {
+	reader, err := manufacturerReader()
+	if err != nil {
+		return nil, err
+	}
+	if reader == nil {
+		return nil, errors.New("got nil reader")
+	}
+	manufacturer, err := ioutil.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading %v: %v", linuxProductNameFile, err)
+	}
+	return manufacturer, nil
+}
+
+// isRunningOnGCP checks whether the local system, without doing a network request is
+// running on GCP.
+func isRunningOnGCP() (bool, error) {
+	manufacturer, err := readManufacturer()
+	if os.IsNotExist(err) {
+		return false, err
+	}
+	if err != nil {
+		return false, fmt.Errorf("failure to read manufacturer information: %v", err)
+	}
+	name := string(manufacturer)
+	switch runtime.GOOS {
+	case "linux":
+		name = strings.TrimSpace(name)
+		return name == "Google" || name == "Google Compute Engine", nil
+	case "windows":
+		name = strings.Replace(name, " ", "", -1)
+		name = strings.Replace(name, "\n", "", -1)
+		name = strings.Replace(name, "\r", "", -1)
+		return name == "Google", nil
+	default:
+		return false, platformError(runtime.GOOS)
+	}
+	return false, nil
+}
+
+func hasDirectPathIPv6Route(iface net.Interface) (bool, error) {
+	infoLog.Printf("Check all IPv6 routes on network interface |Name: %s, hardware address: %s, flags: %s| returned by |netlink.LinkByName(%s)|", iface.Name, iface.HardwareAddr, iface.Flags, iface.Name)
+	link, err := netlink.LinkByName(iface.Name)
+	if err != nil {
+		return false, err
+	}
+	rl, err := netlink.RouteList(link, netlink.FAMILY_V6)
+	for _, r := range rl {
+		infoLog.Printf("Found IPv6 route: |%s| on network interface |%s|", r, iface.Name)
+		if strings.Contains(r.Dst.String(), "2001:4860:8040::/42") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func runCheck(name string, check func() error) {
 	if err := check(); err != nil {
 		fmt.Printf("\x1b[1m%v: \x1b[31mFAILED. Error: %v\x1b[0m\n", name, err)
@@ -142,31 +234,101 @@ func main() {
 	if syscall.Getuid() != 0 {
 		infoLog.Println("Not running as root, some checks may fail.")
 	}
-	// Check IPv6
-	runCheck("IPv6 routes", func() error {
-		var out string
-		var err error
-		cmd := "ip -6 route show"
-		infoLog.Printf("Check IPv6 routes with:|%v|...\n", cmd)
-		if out, err = getOutput(cmd); err != nil {
+
+	// Check if dp_check is running on GCP
+	runCheck("Running on GCP", func() error {
+		ret, err := isRunningOnGCP()
+		if err != nil {
 			return err
 		}
-		if !strings.Contains(out, "2001:4860:8040::/42") {
-			return fmt.Errorf(`Missing route prefix to backends: 2001:4860:8040::/42.
-IPv6 route setup either failed or hasn't been attempted`)
+		if !ret {
+			return fmt.Errorf("dp_check is not running on GCP, this tool will not work as intended")
 		}
 		return nil
 	})
-	runCheck("IPv6 addresses", func() error {
-		var out string
-		var err error
-		cmd := "ip -6 addr show"
-		infoLog.Printf("Check IPv6 addresses with:|%v|...\n", cmd)
-		if out, err = getOutput(cmd); err != nil {
+
+	runCheck("DirectPath enablement", func() error {
+		client := &http.Client{}
+		metadataServerUrl := "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ipv6s"
+		infoLog.Println("Check if DirectPath is enabled for this VM by sending http GET request to", metadataServerUrl)
+		req, err := http.NewRequest("GET", metadataServerUrl, nil)
+		if err != nil {
 			return err
 		}
-		if !strings.Contains(out, "inet6 2600") {
-			return fmt.Errorf("This VM is missing a global 2600-prefixed IPv6 address. IPv6 DHCP setup either failed or hasn't been attempted")
+		req.Header.Add("Metadata-Flavor", "Google")
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == 200 {
+			ipv6FromMetadataServer = net.ParseIP(strings.TrimSuffix(string(body), "\n"))
+			infoLog.Printf("Received IPv6 address %s from metadata server", ipv6FromMetadataServer)
+			return nil
+		}
+		if resp.StatusCode == 404 {
+			return fmt.Errorf("This VM doesn't have DirectPath access")
+		}
+		return fmt.Errorf("Received status code %d in response to metadata server GET request to URL: %s. This is unexpected (we only expect status codes 200 or 404), and so this may indicate a bug", resp.StatusCode, metadataServerUrl)
+	})
+
+	var directPathNetworkInterface net.Interface
+	runCheck("IPv6 addresses", func() error {
+		if ipv6FromMetadataServer == nil {
+			return fmt.Errorf("Skipping IPv6 addresses check because the VM failed to get a valid IPv6 address from metadata server")
+		}
+		infoLog.Println("Check IPv6 address by iterating over all ip addresses from interfaces returned by: |net.Interfaces()|")
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			return err
+		}
+		// Go through all interfaces on the VM to see if IPv6 is enabled and if there is an IPv6 address, then check against the IPv6 address returned from metadataserver
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			if iface.Flags&net.FlagUp != net.FlagUp {
+				continue
+			}
+			infoLog.Printf("Checking non-loopback and up network interface: |Name: %s, hardware address: %s, flags: %s|", iface.Name, iface.HardwareAddr, iface.Flags)
+			ifaddrs, err := iface.Addrs()
+			if err != nil {
+				return err
+			}
+			for _, ifaddr := range ifaddrs {
+				ip := ifaddr.(*net.IPNet).IP
+				infoLog.Printf("Found ip address |%s| when checking network interface |%s|", ip.String(), iface.Name)
+				if ip.To4() == nil && ip.Equal(ipv6FromMetadataServer) {
+					directPathNetworkInterface = iface
+					break
+				}
+			}
+			if directPathNetworkInterface.Name != "" {
+				break
+			}
+		}
+		if directPathNetworkInterface.Name == "" {
+			return fmt.Errorf("This VM was expected to have a network interface with IPv6 address: %s assigned to it, but no such interface was found, IPv6 DHCP setup either failed or hasn't been attempted", ipv6FromMetadataServer)
+		}
+		infoLog.Printf("Found the valid directpath network interface %s with hardware address |%s| and flags %s", directPathNetworkInterface.Name, directPathNetworkInterface.HardwareAddr, directPathNetworkInterface.Flags)
+		return nil
+	})
+
+	runCheck("IPv6 routes", func() error {
+		if directPathNetworkInterface.Name == "" {
+			return fmt.Errorf("Skipping IPv6 routes check because there is no valid directpath network interface on this machine")
+		}
+		hasRoute, err := hasDirectPathIPv6Route(directPathNetworkInterface)
+		if err != nil {
+			return err
+		}
+		if !hasRoute {
+			return fmt.Errorf(`Missing route prefix to backends: 2001:4860:8040::/42.
+IPv6 route setup either failed or hasn't been attempted`)
 		}
 		return nil
 	})
@@ -175,19 +337,19 @@ IPv6 route setup either failed or hasn't been attempted`)
 	runCheck("Load balancer AAAA DNS queries", func() error {
 		var addrs []string
 		var err error
-		infoLog.Printf("Resolve LB addrs with:|net.LookupHost(\"%v\")|...\n", loadBalancerDNS)
+		infoLog.Printf("Resolve LB addrs with:|net.LookupHost(\"%v\")|...", loadBalancerDNS)
 		if addrs, err = net.LookupHost(loadBalancerDNS); len(addrs) == 0 || err != nil {
 			return fmt.Errorf(`Load balancer DNS resolution failed: %v.
 Either this VM doesn't have DirectPath access, or there is a bug that may be causing a larger outage`, err)
 		}
 		for _, addr := range addrs {
-			infoLog.Printf("Resolved LB addr: %v\n", addr)
+			infoLog.Printf("Resolved LB addr: %v", addr)
 		}
 		return nil
 	})
 	var balancerAddr string
 	runCheck("Service SRV DNS queries", func() error {
-		infoLog.Printf("Lookup service SRV records with:|net.DefaultResolver.LoookupSRV(context.Background(), \"grpclb\", \"tcp\", \"%v\")|...\n", *service)
+		infoLog.Printf("Lookup service SRV records with:|net.DefaultResolver.LoookupSRV(context.Background(), \"grpclb\", \"tcp\", \"%v\")|...", *service)
 		_, srvs, err := net.DefaultResolver.LookupSRV(context.Background(), "grpclb", "tcp", *service)
 		if err != nil || len(srvs) == 0 {
 			return fmt.Errorf(`SRV record resolution for _grpclb._tcp.%s failed with error:|%v|.
@@ -209,7 +371,7 @@ The most likely reason for this is that %s is not a DirectPath-enabled service`,
 		if len(balancerAddr) == 0 {
 			return fmt.Errorf("Skipping TCP connectivity to load balancers because load balancer DNS resolution failed")
 		}
-		infoLog.Printf("Check TCP connectivity to LB's with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...\n", balancerAddr)
+		infoLog.Printf("Check TCP connectivity to LB's with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", balancerAddr)
 		if _, err := net.DialTimeout("tcp", balancerAddr, time.Second*5); err != nil {
 			return fmt.Errorf("TCP connectivity to the load balancer failed: %v. This may be a transient error specific to the load balancer at %v", err, balancerAddr)
 		}
@@ -222,7 +384,7 @@ The most likely reason for this is that %s is not a DirectPath-enabled service`,
 			return fmt.Errorf("Skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
 		}
 		var err error
-		infoLog.Printf("Find backend addresses for %v by making a \"BalanceLoad\" RPC to the load balancers...\n", *service)
+		infoLog.Printf("Find backend addresses for %v by making a \"BalanceLoad\" RPC to the load balancers...", *service)
 		if backendAddrs, err = getBackendAddrsFromGrpclb(balancerAddr); err != nil {
 			return fmt.Errorf(`Failed to get any backend VIPs from the load balancer because: %v.
 Consider running this binary under environment variables:
@@ -231,7 +393,7 @@ Consider running this binary under environment variables:
 in order to get more debug logs from the grpc library (which was just used when reaching out to the load balancer)`, err)
 		}
 		for _, addr := range backendAddrs {
-			infoLog.Printf("Found backend address:|%v|\n", addr)
+			infoLog.Printf("Found backend address:|%v|", addr)
 		}
 		return nil
 	})
@@ -242,7 +404,7 @@ in order to get more debug logs from the grpc library (which was just used when 
 		if len(backendAddrs) == 0 {
 			return fmt.Errorf("Skipping TCP connectivity to backends because discovery of backends failed")
 		}
-		infoLog.Printf("Check TCP connectivity to backends with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...\n", backendAddrs[0])
+		infoLog.Printf("Check TCP connectivity to backends with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", backendAddrs[0])
 		if _, err := net.DialTimeout("tcp", backendAddrs[0], time.Second*5); err != nil {
 			return fmt.Errorf("TCP connectivity to backend addr - %v failed: %v", backendAddrs[0], err)
 		}
@@ -253,7 +415,7 @@ in order to get more debug logs from the grpc library (which was just used when 
 		if !tcpConnectivitySucceeded {
 			return fmt.Errorf("Skipping secure connectivity to backends because TCP connectivity to backends did not succeed")
 		}
-		infoLog.Printf("Check secure connectivity to backends by attempting to complete all handshakes involved in the setup of a gRPC/ALTS connection to %v", backendAddrs[0])
+		infoLog.Println("Check secure connectivity to backends by attempting to complete all handshakes involved in the setup of a gRPC/ALTS connection to", backendAddrs[0])
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		altsCreds := alts.NewClientCreds(alts.DefaultClientOptions())
