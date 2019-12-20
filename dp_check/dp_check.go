@@ -265,9 +265,6 @@ func main() {
 		if err != nil {
 			return err
 		}
-		if err != nil {
-			return err
-		}
 		if resp.StatusCode == 200 {
 			ipv6FromMetadataServer = net.ParseIP(strings.TrimSuffix(string(body), "\n"))
 			infoLog.Printf("Received IPv6 address %s from metadata server", ipv6FromMetadataServer)
