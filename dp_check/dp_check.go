@@ -109,9 +109,6 @@ func getBackendAddrsFromGrpclb(lbAddr string) ([]string, error) {
 	if initResp == nil {
 		return nil, fmt.Errorf("gRPC reply from balancer did not include initial response", err)
 	}
-	if initResp.LoadBalancerDelegate != "" {
-		return nil, fmt.Errorf("grpc balancer delegation is not supported")
-	}
 	// Just wait for the first non-empty server list
 	for {
 		reply, err = stream.Recv()
