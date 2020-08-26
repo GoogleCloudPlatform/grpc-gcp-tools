@@ -46,7 +46,27 @@ import (
 )
 
 var (
-	service                = flag.String("service", "", "The public DirectPath-enabled DNS of the service to check")
+	service = flag.String("service", "", "Required. The public DirectPath-enabled DNS of the service to check")
+	skip    = flag.String("skip", "", `Optional. A comma-separated list of checks to skip. The default behavior
+(when set to the empty string) is to not skip any checks. List of all checks includes:
+"Running on GCP"
+"DirectPath enablement"
+"IPv6 addresses"
+"IPv6 routes"
+"Load balancer DNS queries"
+"Service SRV DNS queries"
+"TCP connectivity to load balancers"
+"Discovery of backends via load balancers"
+"TCP connectivity to backends"
+"Secure connectivity to backends"
+
+Example to run only the IPv6 address and route checks: --skip="IPv6 Addresses,IPv6 routes".
+This is useful only in unique environments, and usually the default setting (skip nothing) is best.
+`)
+	balancerTargetOverride = flag.String("balancer_target_override", "", `Optional. The target hostname (or IP literal), including
+port number, of the load balancer. This is mainly useful if one would like to check the proper setup of a VM and service with respect
+to e.g. DirectPath networking and load balancing, in such a way that ignores DNS. In most use cases, it would be desirable to set this
+in conjunction with --skip="Load balancer DNS queries,Service SRV DNS queries"`)
 	infoLog                = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 	failureCount           int
 	runningOS              = runtime.GOOS
@@ -61,6 +81,7 @@ func (k platformError) Error() string {
 
 const (
 	loadBalancerDNS          = "grpclb.directpath.google.internal."
+	loadBalancerDualstackDNS = "grpclb-dualstack.directpath.google.internal."
 	linuxProductNameFile     = "/sys/class/dmi/id/product_name"
 	windowsManufacturerRegex = ":(.*)"
 	windowsCheckCommand      = "powershell.exe"
@@ -77,6 +98,7 @@ func cmd(command string) (string, error) {
 func getBackendAddrsFromGrpclb(lbAddr string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
 	defer cancel()
+	infoLog.Printf("Attempt to dial: %v using ALTS and grpc.WithBlock()...", lbAddr)
 	conn, err := grpc.DialContext(
 		ctx,
 		lbAddr,
@@ -86,6 +108,7 @@ func getBackendAddrsFromGrpclb(lbAddr string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Failed to create grpc connection to balancer: %v", err)
 	}
+	infoLog.Printf("Successfully dialed balancer. Now send initial grpc request...")
 	lbClient := lbpb.NewLoadBalancerClient(conn)
 	stream, err := lbClient.BalanceLoad(ctx)
 	initReq := &lbpb.LoadBalanceRequest{
@@ -99,16 +122,18 @@ func getBackendAddrsFromGrpclb(lbAddr string) ([]string, error) {
 		return nil, fmt.Errorf("Failed to open stream to the balancer: %v", err)
 	}
 	if err := stream.Send(initReq); err != nil {
-		return nil, fmt.Errorf("Failed to send init grpc request to balancer: %v", err)
+		return nil, fmt.Errorf("Failed to send initial grpc request to balancer: %v", err)
 	}
+	infoLog.Printf("Successfully sent initial grpc request to balancer: |%v|. Now wait for initial response...", initReq)
 	reply, err := stream.Recv()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to recv init grpc response from balancer: %v", err)
+		return nil, fmt.Errorf("Failed to recv initial grpc response from balancer: %v", err)
 	}
 	initResp := reply.GetInitialResponse()
 	if initResp == nil {
 		return nil, fmt.Errorf("gRPC reply from balancer did not include initial response", err)
 	}
+	infoLog.Printf("Successfully received initial grpc response from balancer: |%v|. Now wait for a serverlist...", initResp)
 	// Just wait for the first non-empty server list
 	for {
 		reply, err = stream.Recv()
@@ -214,6 +239,14 @@ func hasDirectPathIPv6Route(iface net.Interface) (bool, error) {
 }
 
 func runCheck(name string, check func() error) {
+	if len(*skip) > 0 {
+		for _, c := range strings.Split(*skip, ",") {
+			if c == name {
+				fmt.Printf("\x1b[1m%v: \x1b[34m[SKIPPED. Manually skipped due to inclusion in --skip=\"%v\"\x1b[0m\n", name, *skip)
+				return
+			}
+		}
+	}
 	if err := check(); err != nil {
 		fmt.Printf("\x1b[1m%v: \x1b[31mFAILED. Error: %v\x1b[0m\n", name, err)
 		failureCount++
@@ -227,6 +260,13 @@ func main() {
 	infoLog.Println("Running dp_check.")
 	if len(*service) == 0 {
 		panic("--service not set")
+	}
+	var balancerAddr string
+	var balancerHost string
+	if len(*balancerTargetOverride) > 0 {
+		infoLog.Printf("--balancer_target_override is non-empty. Will override load balancer target used in load balancer connectivity checks and queries to: %v", *balancerTargetOverride)
+		balancerAddr = *balancerTargetOverride
+		balancerHost, _, _ = net.SplitHostPort(balancerAddr)
 	}
 	if syscall.Getuid() != 0 {
 		infoLog.Println("Not running as root, some checks may fail.")
@@ -331,20 +371,6 @@ IPv6 route setup either failed or hasn't been attempted`)
 	})
 
 	// Check DNS
-	runCheck("Load balancer AAAA DNS queries", func() error {
-		var addrs []string
-		var err error
-		infoLog.Printf("Resolve LB addrs with:|net.LookupHost(\"%v\")|...", loadBalancerDNS)
-		if addrs, err = net.LookupHost(loadBalancerDNS); len(addrs) == 0 || err != nil {
-			return fmt.Errorf(`Load balancer DNS resolution failed: %v.
-Either this VM doesn't have DirectPath access, or there is a bug that may be causing a larger outage`, err)
-		}
-		for _, addr := range addrs {
-			infoLog.Printf("Resolved LB addr: %v", addr)
-		}
-		return nil
-	})
-	var balancerAddr string
 	runCheck("Service SRV DNS queries", func() error {
 		infoLog.Printf("Lookup service SRV records with:|net.DefaultResolver.LoookupSRV(context.Background(), \"grpclb\", \"tcp\", \"%v\")|...", *service)
 		_, srvs, err := net.DefaultResolver.LookupSRV(context.Background(), "grpclb", "tcp", *service)
@@ -355,13 +381,32 @@ The most likely reason for this is that %s is not a DirectPath-enabled service`,
 		if len(srvs) != 1 {
 			return fmt.Errorf("Got %d SRV records:|%v|. This is not necessarily an error but is unexpected", len(srvs), srvs)
 		}
-		if strings.Compare(srvs[0].Target, loadBalancerDNS) != 0 {
-			return fmt.Errorf("Got SRV record target:|%v|; expected:|%v|", srvs[0].Target, loadBalancerDNS)
+		if strings.Compare(srvs[0].Target, loadBalancerDNS) != 0 && strings.Compare(srvs[0].Target, loadBalancerDualstackDNS) != 0 {
+			return fmt.Errorf("Got SRV record target:|%v|; expected:|%v| or |%v|", srvs[0].Target, loadBalancerDNS, loadBalancerDualstackDNS)
 		}
-		balancerAddr = fmt.Sprintf("%v:%v", srvs[0].Target, srvs[0].Port)
+		if len(*balancerTargetOverride) == 0 {
+			balancerHost = srvs[0].Target
+			balancerAddr = fmt.Sprintf("%v:%v", balancerHost, srvs[0].Port)
+			infoLog.Printf("--balancer_target_override is empty. Will use results from SRV record for the load balancer target used in load balancer connectivity checks and queries: %v", balancerAddr)
+		}
 		return nil
 	})
-
+	runCheck("Load balancer DNS queries", func() error {
+		if len(balancerHost) == 0 {
+			return fmt.Errorf("Skipping Load balancer DNS queries because load balancer DNS resolution failed")
+		}
+		var addrs []string
+		var err error
+		infoLog.Printf("Resolve LB addrs with:|net.LookupHost(\"%v\")|...", balancerHost)
+		if addrs, err = net.LookupHost(balancerHost); len(addrs) == 0 || err != nil {
+			return fmt.Errorf(`Load balancer DNS resolution failed: %v.
+Either this VM doesn't have DirectPath access, or there is a bug that may be causing a larger outage`, err)
+		}
+		for _, addr := range addrs {
+			infoLog.Printf("Resolved LB addr: %v", addr)
+		}
+		return nil
+	})
 	// Contact LBs
 	tcpToLoadBalancersSucceeded := false
 	runCheck("TCP connectivity to load balancers", func() error {
