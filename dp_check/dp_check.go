@@ -21,7 +21,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,6 +33,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -39,13 +43,26 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/vishvananda/netlink"
 	"google.golang.org/grpc"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/alts"
+	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/grpc/status"
+
+	v3clusterpb "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	v3corepb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	v3endpointpb "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	v3listenerpb "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	v3clusterextpb "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/aggregate/v3"
+	v3httppb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	v3adsgrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	v3discoverypb "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	structpb "google.golang.org/protobuf/types/known/structpb"
 )
 
 var (
@@ -64,15 +81,19 @@ Example to run only the IPv6 address and route checks: --skip="IPv6 Addresses,IP
 
 Note that this is an unstable API because check names are prone to change, prefer --ipv4_only or --ipv6_only if skips are needed.
 `)
-	balancerTargetOverride = flag.String("balancer_target_override", "", `Optional. The target hostname (or IP literal), including
+	balancerTargetOverride = flag.String("balancer_target_override", "", `Optional. The target hostname (must be a DNS name for secure naming purposes), including
 port number, of the load balancer. This is mainly useful if one would like to check the proper setup of a VM and service with respect
-to e.g. DirectPath networking and load balancing, in such a way that ignores DNS. In most use cases, it would be desirable to set this
-in conjunction with --skip="Load balancer DNS queries,Service SRV DNS queries"`)
-	userAgent    = flag.String("user_agent", "", "Optional. The user agent header to use on RPCs to the load balancer")
-	infoLog      = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
-	failureCount int
-	runningOS    = runtime.GOOS
+to e.g. DirectPath networking and load balancing, in such a way that ignores DNS SRV resolution. In most use cases, it would be desirable to set this
+in conjunction with --skip="Service SRV DNS queries".`)
+	checkXds                = flag.Bool("check_xds", false, `Optional. Add extra checks to get backend addresses from Traffic Director.`)
+	userAgent               = flag.String("user_agent", "", "Optional. The user agent header to use on RPCs to the load balancer")
+	trafficDirectorHostname = flag.String("td_hostname", "staging-directpath-pa.sandbox.googleapis.com", `Optional. Override the Traffic Director hostname. Do not include a port number.`)
+	infoLog                 = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+	failureCount            int
+	runningOS               = runtime.GOOS
 )
+
+type adsStream v3adsgrpc.AggregatedDiscoveryService_StreamAggregatedResourcesClient
 
 type platformError string
 
@@ -89,6 +110,20 @@ const (
 	windowsCheckCommand      = "powershell.exe"
 	windowsCheckCommandArgs  = "Get-WmiObject -Class Win32_BIOS"
 	powershellOutputFilter   = "Manufacturer"
+
+	trafficDirectorPort             = "443"
+	gRPCUserAgentName               = "grpc-go"
+	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
+	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
+	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
+	// V3ListenerURL is typeURL of v3 xDS Listener
+	V3ListenerURL = "type.googleapis.com/envoy.config.listener.v3.Listener"
+	// V3RouteConfigURL is typeURL of v3 xDS RouteConfiguration
+	V3RouteConfigURL = "type.googleapis.com/envoy.config.route.v3.RouteConfiguration"
+	// V3ClusterURL is typeURL of v3 xDS Cluster
+	V3ClusterURL = "type.googleapis.com/envoy.config.cluster.v3.Cluster"
+	// V3EndpointsURL is typeURL of v3 xDS ClusterLoadAssignment
+	V3EndpointsURL = "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment"
 )
 
 type skipCheckError struct {
@@ -284,11 +319,13 @@ func checkLocalIPv4Routes(directPathIPv4NetworkInterface *net.Interface, ipv4Fro
 	return nil
 }
 
-func getBackendAddrsFromGrpclb(lbAddr string, srvQueriesSucceeded bool) ([]string, error) {
+func getBackendAddrsFromGrpclb(lbAddr string, balancerHostname string, srvQueriesSucceeded bool) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
 	defer cancel()
+	altsCreds := alts.NewClientCreds(alts.DefaultClientOptions())
+	altsCreds.OverrideServerName(balancerHostname)
 	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(alts.NewClientCreds(alts.DefaultClientOptions())),
+		grpc.WithTransportCredentials(altsCreds),
 		grpc.WithBlock(),
 	}
 	userAgentLogString := fmt.Sprintf(". Note that we are not overriding the user agent, so the grpc-go library will use the default user agent based on the grpc-go library version: |%v|...", grpc.Version)
@@ -377,7 +414,7 @@ func getBackendAddrsFromGrpclb(lbAddr string, srvQueriesSucceeded bool) ([]strin
 	}
 }
 
-func resolveBackends(balancerAddress string, srvQueriesSucceeded bool) ([]string, error) {
+func resolveBackends(balancerAddress string, balancerHostname string, srvQueriesSucceeded bool) ([]string, error) {
 	var addressFamily string
 	var matchAddrFamily func(net.IP) bool
 	balancerHost, _, err := net.SplitHostPort(balancerAddress)
@@ -399,7 +436,7 @@ func resolveBackends(balancerAddress string, srvQueriesSucceeded bool) ([]string
 	}
 	var backends []string
 	infoLog.Printf("Find %v backend addresses for %v by making a \"BalanceLoad\" RPC to the load balancers...", addressFamily, *service)
-	if backends, err = getBackendAddrsFromGrpclb(balancerAddress, srvQueriesSucceeded); err != nil {
+	if backends, err = getBackendAddrsFromGrpclb(balancerAddress, balancerHostname, srvQueriesSucceeded); err != nil {
 		return nil, fmt.Errorf(`Failed to get any %v backend VIPs from the load balancer because: %v.
 Consider running this binary under environment variables:
 * GRPC_GO_LOG_VERBOSITY_LEVEL=99
@@ -531,6 +568,467 @@ func runCheck(name string, check func() error) {
 	fmt.Printf("\x1b[1m%v: \x1b[32mPASSED\x1b[0m\n", name)
 }
 
+func openAdsStream(ctx context.Context) (adsStream, error) {
+	// use TLS credential
+	var roots *x509.CertPool
+	tlsCreds := credentials.NewTLS(&tls.Config{RootCAs: roots})
+	tlsCreds.OverrideServerName(*trafficDirectorHostname)
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(tlsCreds),
+		grpc.WithPerRPCCredentials(oauth.NewComputeEngine()),
+		grpc.WithBlock(),
+	}
+	lbAddr := net.JoinHostPort(*trafficDirectorHostname, trafficDirectorPort)
+	infoLog.Printf("Attempt to dial |%v| using TLS and we're authenticating as the VM's default service account by fetching a token from the metadata server", lbAddr)
+	conn, err := grpc.DialContext(ctx, lbAddr, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create grpc connection to Traffic Director: %v", err)
+	}
+	lbClient := v3adsgrpc.NewAggregatedDiscoveryServiceClient(conn)
+	stream, err := lbClient.StreamAggregatedResources(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open the stream to Traffic Director: %v", err)
+	}
+	return stream, nil
+}
+
+func sendXdsRequest(stream adsStream, node *v3corepb.Node, typeURL, resourceName string, versionInfoMap, nonceMap map[string]string) (*v3discoverypb.DiscoveryResponse, error) {
+	typeNameMap := map[string]string{
+		V3ListenerURL:    "LDS",
+		V3RouteConfigURL: "RDS",
+		V3ClusterURL:     "CDS",
+		V3EndpointsURL:   "EDS",
+	}
+	requestName := typeNameMap[typeURL]
+	infoLog.Printf("Now send %v request...", requestName)
+	xdsReq := &v3discoverypb.DiscoveryRequest{
+		VersionInfo:   versionInfoMap[typeURL],
+		Node:          node,
+		ResourceNames: []string{resourceName},
+		TypeUrl:       typeURL,
+		ResponseNonce: nonceMap[typeURL],
+	}
+	if err := stream.Send(xdsReq); err != nil {
+		return nil, fmt.Errorf("failed to send %v request: %v", requestName, err)
+	}
+	infoLog.Printf("Successfully sent %v request: |%+v|. Now wait for the reply...", requestName, xdsReq)
+	xdsReply, err := stream.Recv()
+	if err != nil {
+		return nil, fmt.Errorf("failed to receive %v response: %v", requestName, err)
+	}
+	infoLog.Printf("Successfully received %v reply: |%+v|.", requestName, xdsReply)
+	versionInfoMap[typeURL] = xdsReply.GetVersionInfo()
+	nonceMap[typeURL] = xdsReply.GetNonce()
+	if err = ackXdsResponse(stream, node, typeURL, resourceName, versionInfoMap, nonceMap); err != nil {
+		return nil, fmt.Errorf("failed to acked %v response: %v", requestName, err)
+	}
+	infoLog.Printf("Successfully acked %v reply.", requestName)
+	return xdsReply, nil
+}
+
+func ackXdsResponse(stream adsStream, node *v3corepb.Node, typeURL, resourceName string, versionInfoMap, nonceMap map[string]string) error {
+	ackReq := &v3discoverypb.DiscoveryRequest{
+		VersionInfo:   versionInfoMap[typeURL],
+		Node:          node,
+		ResourceNames: []string{resourceName},
+		TypeUrl:       typeURL,
+		ResponseNonce: nonceMap[typeURL],
+	}
+	if err := stream.Send(ackReq); err != nil {
+		return fmt.Errorf("Failed to ack xDS response: %v", err)
+	}
+	return nil
+}
+
+// Extract cluster_name from LDS response
+func processLdsResponse(ldsReply *v3discoverypb.DiscoveryResponse) (string, error) {
+	if len(ldsReply.GetResources()) == 0 {
+		return "", fmt.Errorf("no listener resource received in LDS response")
+	}
+	if len(ldsReply.GetResources()) != 1 {
+		return "", fmt.Errorf("expect to receive only 1 listener resource in LDS response, but received %v. This is not necessarily a violation of the XDS protocol, but it is not supported by (this version) of the dp_check tool", len(ldsReply.GetResources()))
+	}
+	resource := ldsReply.GetResources()[0]
+	lis := &v3listenerpb.Listener{}
+	if err := proto.Unmarshal(resource.GetValue(), lis); err != nil {
+		return "", fmt.Errorf("failed to unmarshal listener resource from LDS response: %v", err)
+	}
+	if lis.GetName() != *service {
+		return "", fmt.Errorf("listener resource name |%v| does not match |%v|", lis.GetName(), *service)
+	}
+	apiLis := &v3httppb.HttpConnectionManager{}
+	if err := proto.Unmarshal(lis.GetApiListener().GetApiListener().GetValue(), apiLis); err != nil {
+		return "", fmt.Errorf("failed to unmarshal api_listener resource from LDS response: %v", err)
+	}
+	switch apiLis.RouteSpecifier.(type) {
+	// TODO(mohanli): Add RDS support when processing LDS response
+	case *v3httppb.HttpConnectionManager_Rds:
+		return "", fmt.Errorf("route resource type in LDS response is RDS, which is currently not supported in dp_check")
+	case *v3httppb.HttpConnectionManager_RouteConfig:
+		infoLog.Printf("route resource type in LDS response is route_config")
+		for _, vh := range apiLis.GetRouteConfig().GetVirtualHosts() {
+			infoLog.Printf("virtual host: |%+v|", vh)
+			// The domains field of the VirtualHost must match the backend service
+			if len(vh.GetDomains()) == 0 {
+				infoLog.Printf("no domain received in this virtual_host, skip this virtual_host")
+				continue
+			}
+			if vh.GetDomains()[0] != *service {
+				infoLog.Printf("received a virtual_host whose domain is |%v|, which does not match |%v|, skip this virtual_host", vh.GetDomains()[0], *service)
+				continue
+			}
+			// In the initial gRPC xDS design, only interested the default route (the last one)
+			if len(vh.GetRoutes()) == 0 {
+				infoLog.Printf("no routes received in virtual_host, skip")
+				continue
+			}
+			route := vh.GetRoutes()[len(vh.GetRoutes())-1]
+			// The match field in the route must contains a prefix field,
+			// and the prefix field must be an empty string
+			match := route.GetMatch()
+			if match == nil {
+				infoLog.Printf("match field must exist, but it is nil, skip this virtual_host")
+				continue
+			}
+			if match.GetPrefix() != "" {
+				infoLog.Printf("match field in default route must have an empty prefix, but it is |%v|, skip this virtual_host", match.GetPrefix())
+				continue
+			}
+			// Get cluster name
+			return route.GetRoute().GetCluster(), nil
+		}
+	case nil:
+		return "", fmt.Errorf("no route resource in LDS response")
+	default:
+		return "", fmt.Errorf("unknown route resource type in LDS response: %v", apiLis.RouteSpecifier)
+	}
+	return "", fmt.Errorf("no matching cluster name found in LDS response")
+}
+
+// Extract cluster from CDS response
+func getCluster(cdsReply *v3discoverypb.DiscoveryResponse, expectedClusterName string) (*v3clusterpb.Cluster, error) {
+	if len(cdsReply.GetResources()) == 0 {
+		return nil, fmt.Errorf("no cluster resource received in CDS response")
+	}
+	if len(cdsReply.GetResources()) != 1 {
+		return nil, fmt.Errorf("expect to receive only 1 cluster resource in CDS response, but received %v", len(cdsReply.GetResources()))
+	}
+	resource := cdsReply.GetResources()[0]
+	cluster := &v3clusterpb.Cluster{}
+	if err := proto.Unmarshal(resource.GetValue(), cluster); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal cluster resource from CDS response: %v", err)
+	}
+	if cluster.GetName() != expectedClusterName {
+		return nil, fmt.Errorf("cluster resource name |%v| does not match |%v|", cluster.GetName(), expectedClusterName)
+	}
+	return cluster, nil
+}
+
+// Extract primary cluster (for DirectPath) and secondary cluster (for fallback to CFE) from aggregate cluster
+func processAggregateClusterResponse(cdsReply *v3discoverypb.DiscoveryResponse, clusterName string) ([]string, error) {
+	aggregateCluster, err := getCluster(cdsReply, clusterName)
+	if err != nil {
+		return []string{}, fmt.Errorf("failed to get aggregate cluster from CDS response: %v", err)
+	}
+	if aggregateCluster.GetClusterType() == nil || aggregateCluster.GetClusterType().GetName() != "envoy.clusters.aggregate" {
+		return []string{}, fmt.Errorf("failed to receive an aggregate cluster from Traffic Director")
+	}
+	clusterConfig := &v3clusterextpb.ClusterConfig{}
+	if err := proto.Unmarshal(aggregateCluster.GetClusterType().GetTypedConfig().GetValue(), clusterConfig); err != nil {
+		return []string{}, fmt.Errorf("failed to unmarshal cluster_config resource from CDS response: %v", err)
+	}
+	if len(clusterConfig.GetClusters()) == 0 {
+		return []string{}, fmt.Errorf("no clusters received in aggregate cluster")
+	}
+	if len(clusterConfig.GetClusters()) != 2 {
+		for _, c := range clusterConfig.GetClusters() {
+			infoLog.Printf("Found cluster in aggregate cluster: |%v|", c)
+		}
+		return []string{}, fmt.Errorf("expected to receive 2 clusters in aggregate cluster, but received %v", len(clusterConfig.GetClusters()))
+	}
+	return clusterConfig.GetClusters(), nil
+}
+
+// Extract service_name from EDS cluster
+func processEdsClusterResponse(cdsReply *v3discoverypb.DiscoveryResponse, clusterName string) (string, error) {
+	edsCluster, err := getCluster(cdsReply, clusterName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get EDS cluster from CDS response: %v", err)
+	}
+	if edsCluster.GetType() != v3clusterpb.Cluster_EDS {
+		return "", fmt.Errorf("the cluster type is expected to be LOGICAL_DNS, but it is: %v", edsCluster.GetType())
+	}
+	// The cluster lbPolicy field must be Round Robin or Ring Hash
+	if edsCluster.GetLbPolicy() != v3clusterpb.Cluster_ROUND_ROBIN && edsCluster.GetLbPolicy() != v3clusterpb.Cluster_RING_HASH {
+		return "", fmt.Errorf("expected cluster lb_policy field to be Round Robin or Ring Hash, but is is: |%+v|", edsCluster.GetLbPolicy())
+	}
+	if serviceName := edsCluster.GetEdsClusterConfig().GetServiceName(); serviceName != "" {
+		infoLog.Printf("eds_cluster_config.service_name |%v| is not empty, use it as the service_name for EDS request", serviceName)
+		return serviceName, nil
+	}
+	infoLog.Printf("eds_cluster_config.service_name is empty, use cluster_name |%v| as the service_name for EDS request", clusterName)
+	return clusterName, nil
+}
+
+// Check DNS cluster
+func processDNSClusterResponse(cdsReply *v3discoverypb.DiscoveryResponse, clusterName string) error {
+	dnsCluster, err := getCluster(cdsReply, clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to get DNS cluster from CDS response: %v", err)
+	}
+	// cluster type must be LOGICAL_DNS
+	if dnsCluster.GetType() != v3clusterpb.Cluster_LOGICAL_DNS {
+		return fmt.Errorf("the cluster type is expected to be LOGICAL_DNS, but it is: %v", dnsCluster.GetType())
+	}
+	// the DNS cluster must exactly have one locality
+	if len(dnsCluster.GetLoadAssignment().GetEndpoints()) != 1 {
+		for _, locality := range dnsCluster.GetLoadAssignment().GetEndpoints() {
+			infoLog.Printf("Found locality in DNS cluster: %v", locality)
+		}
+		return fmt.Errorf("the DNS cluster must have exactly 1 locality, but it has %v", len(dnsCluster.GetLoadAssignment().GetEndpoints()))
+	}
+	// the locality must exactly have one endpoint
+	locality := dnsCluster.GetLoadAssignment().GetEndpoints()[0]
+	if len(locality.GetLbEndpoints()) != 1 {
+		for _, endpoint := range locality.GetLbEndpoints() {
+			infoLog.Printf("Found endpoint in DNS cluster: %v", endpoint)
+		}
+		return fmt.Errorf("the DNS cluster must exactly has 1 endpoint, but it has %v", len(locality.GetLbEndpoints()))
+	}
+	// check socket_address field of the endpoint
+	socketAddress := locality.GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	if socketAddress.GetAddress() != *service {
+		return fmt.Errorf("the address field must be service name |%v|, but it is |%v|", *service, socketAddress.GetAddress())
+	}
+	if socketAddress.GetPortValue() != 443 {
+		return fmt.Errorf("the port_value field must be CFE port 443, but it is: %v", socketAddress.GetPortValue())
+	}
+	if socketAddress.GetResolverName() != "" {
+		return fmt.Errorf("the resolver_name field must not be set, but it is: %v", socketAddress.GetResolverName())
+	}
+	return nil
+}
+
+// Extract backend IP:port from RDS response
+func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, error) {
+	if len(edsReply.GetResources()) != 1 {
+		if len(edsReply.GetResources()) == 0 {
+			return []string{}, fmt.Errorf("no cluster_load_assignment resource received in EDS response")
+		}
+		return []string{}, fmt.Errorf("expect to receive only 1 cluster_load_assigment resource in EDS response, but received %v", len(edsReply.GetResources()))
+	}
+	resource := edsReply.GetResources()[0]
+	clusterLoadAssignment := &v3endpointpb.ClusterLoadAssignment{}
+	if err := proto.Unmarshal(resource.GetValue(), clusterLoadAssignment); err != nil {
+		return []string{}, fmt.Errorf("failed to unmarshal cluster_load_assigement resource from EDS response: %v", err)
+	}
+	var results []string
+	countPriorityZero, countPriorityOne, countPriorityOthers := 0, 0, 0
+	for _, endpoint := range clusterLoadAssignment.GetEndpoints() {
+		switch endpoint.GetPriority() {
+		case 0:
+			countPriorityZero++
+			if endpoint.GetLoadBalancingWeight().GetValue() != uint32(100) {
+				infoLog.Printf("the endpoint with priority 0 is expected to have load_balancing_weight 100, but it is: %v, skip", endpoint.GetLoadBalancingWeight())
+				continue
+			}
+			for _, lbendpoint := range endpoint.GetLbEndpoints() {
+				endpoint := lbendpoint.GetEndpoint().GetAddress().GetSocketAddress()
+				results = append(results, net.JoinHostPort(endpoint.GetAddress(), fmt.Sprint(endpoint.GetPortValue())))
+			}
+		case 1:
+			countPriorityOne++
+		default:
+			countPriorityOthers++
+		}
+	}
+	if countPriorityZero != 1 {
+		return []string{}, fmt.Errorf("expected to receive exactly 1 endpoint with priority 0, but received %v", countPriorityZero)
+	}
+	if countPriorityOne > 2 {
+		return []string{}, fmt.Errorf("expected to receive at most 2 endpoints with priority 1, but received %v", countPriorityOne)
+	}
+	if countPriorityOthers != 0 {
+		return []string{}, fmt.Errorf("received endpoint whose priority is not 0 or 1")
+	}
+	if results == nil {
+		return []string{}, fmt.Errorf("no endpoints received in EDS response")
+	}
+	return results, nil
+}
+
+func newNode(id, zone string, ipv6Capable bool) *v3corepb.Node {
+	ret := &v3corepb.Node{
+		Id: id,
+		// QQQ: do we need the following field for dp_check?
+		UserAgentName:        gRPCUserAgentName,
+		UserAgentVersionType: &v3corepb.Node_UserAgentVersion{UserAgentVersion: grpc.Version},
+		ClientFeatures:       []string{clientFeatureNoOverprovisioning},
+	}
+	ret.Locality = &v3corepb.Locality{Zone: zone}
+	if ipv6Capable {
+		ret.Metadata = &structpb.Struct{
+			Fields: map[string]*structpb.Value{
+				ipv6CapableMetadataName: structpb.NewBoolValue(true),
+			},
+		}
+	}
+	return ret
+}
+
+func getZone(timeout time.Duration) (string, error) {
+	qualifiedZone, err := getFromMetadata(timeout, zoneURL)
+	if err != nil {
+		return "", fmt.Errorf("could not fetch zone from metadata server: |%v|", err)
+	}
+	i := bytes.LastIndexByte(qualifiedZone, '/')
+	if i == -1 {
+		return "", fmt.Errorf("could not parse zone |%v|", qualifiedZone)
+	}
+	return string(qualifiedZone[i+1:]), nil
+}
+
+func getFromMetadata(timeout time.Duration, urlStr string) ([]byte, error) {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: timeout}
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    parsedURL,
+		Header: http.Header{"Metadata-Flavor": {"Google"}},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed communicating with metadata server: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metadata server returned resp with non-OK: %v", resp)
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading from metadata server: %v", err)
+	}
+	return body, nil
+}
+
+func checkLDS(stream adsStream, node *v3corepb.Node, versionInfoMap, nonceMap map[string]string) (string, error) {
+	ldsReply, err := sendXdsRequest(stream, node, V3ListenerURL, *service, versionInfoMap, nonceMap)
+	if err != nil {
+		return "", fmt.Errorf("fail to send LDS request: %v", err)
+	}
+	clusterName, err := processLdsResponse(ldsReply)
+	if err != nil {
+		return "", fmt.Errorf("fail to process LDS response: %v", err)
+	}
+	infoLog.Printf("Successfully extract cluster_name from LDS response: |%+v|", clusterName)
+	return clusterName, nil
+}
+
+func checkCDS(stream adsStream, node *v3corepb.Node, aggregateClusterName string, versionInfoMap, nonceMap map[string]string) (string, error) {
+	// check aggregate cluster
+	aggregatedClusterReply, err := sendXdsRequest(stream, node, V3ClusterURL, aggregateClusterName, versionInfoMap, nonceMap)
+	if err != nil {
+		return "", fmt.Errorf("fail to send aggregate cluster request: %v", err)
+	}
+	clusters, err := processAggregateClusterResponse(aggregatedClusterReply, aggregateClusterName)
+	if err != nil {
+		return "", fmt.Errorf("fail to process aggregate cluster response: %v", err)
+	}
+	infoLog.Printf("Received primary cluster for DirectPath: %v", clusters[0])
+	infoLog.Printf("Received secondary cluster for fallback to CFE: %v", clusters[1])
+	// check primary cluster
+	edsClusterReply, err := sendXdsRequest(stream, node, V3ClusterURL, clusters[0], versionInfoMap, nonceMap)
+	if err != nil {
+		return "", fmt.Errorf("fail to send EDS cluster request: %v", err)
+	}
+	serviceName, err := processEdsClusterResponse(edsClusterReply, clusters[0])
+	if err != nil {
+		return "", fmt.Errorf("fail to process EDS cluster response: %v", err)
+	}
+	infoLog.Printf("Successfully extract service_name from CDS response: |%v|", serviceName)
+	// check secondary cluster
+	dnsClusterReply, err := sendXdsRequest(stream, node, V3ClusterURL, clusters[1], versionInfoMap, nonceMap)
+	if err != nil {
+		return "", fmt.Errorf("fail to send DNS cluster request: %v", err)
+	}
+	if err = processDNSClusterResponse(dnsClusterReply, clusters[1]); err != nil {
+		return "", fmt.Errorf("fail to process DNS cluster response: %v", err)
+	}
+	return serviceName, nil
+}
+
+func checkEDS(stream adsStream, node *v3corepb.Node, serviceName string, versionInfoMap, nonceMap map[string]string) ([]string, error) {
+	edsReply, err := sendXdsRequest(stream, node, V3EndpointsURL, serviceName, versionInfoMap, nonceMap)
+	if err != nil {
+		return []string{}, fmt.Errorf("fail to send EDS request: %v", err)
+	}
+	xdsBackendAddrs, err := processEdsResponse(edsReply)
+	if err != nil {
+		return []string{}, fmt.Errorf("fail to process EDS response: %v", err)
+	}
+	if len(xdsBackendAddrs) == 0 {
+		return []string{}, fmt.Errorf("no backend addresses received in EDS response: %v", err)
+	}
+	return xdsBackendAddrs, nil
+}
+
+func getBackendAddrsFromTrafficDirector(ipv6Capable bool) ([]string, error) {
+	// Open a RPC stream to Traffic Director
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
+	defer cancel()
+	stream, err := openAdsStream(ctx)
+	if err != nil {
+		return []string{}, fmt.Errorf("failed to open stream to Traffic Director: %v", err)
+	}
+	// Create node
+	zone, err := getZone(10 * time.Second)
+	if err != nil {
+		return []string{}, fmt.Errorf("failed to get zone from metadata server: %v", err)
+	}
+	node := newNode("dp-check-xds", zone, ipv6Capable)
+	// XDS
+	versionInfoMap := map[string]string{
+		V3ListenerURL:    "",
+		V3RouteConfigURL: "",
+		V3ClusterURL:     "",
+		V3EndpointsURL:   "",
+	}
+	nonceMap := map[string]string{
+		V3ListenerURL:    "",
+		V3RouteConfigURL: "",
+		V3ClusterURL:     "",
+		V3EndpointsURL:   "",
+	}
+	// LDS
+	aggregateClusterName, err := checkLDS(stream, node, versionInfoMap, nonceMap)
+	if err != nil {
+		return []string{}, fmt.Errorf("LDS failed: %v", err)
+	}
+	// CDS
+	serviceName, err := checkCDS(stream, node, aggregateClusterName, versionInfoMap, nonceMap)
+	if err != nil {
+		return []string{}, fmt.Errorf("CDS failed: %v", err)
+	}
+	// EDS
+	xdsBackendAddrs, err := checkEDS(stream, node, serviceName, versionInfoMap, nonceMap)
+	if err != nil {
+		return []string{}, fmt.Errorf("EDS failed: %v", err)
+	}
+	var ipVersion string
+	if ipv6Capable {
+		ipVersion = "IPv6"
+	} else {
+		ipVersion = "IPv4"
+	}
+	for _, backend := range xdsBackendAddrs {
+		infoLog.Printf("Found %v backend address from Traffic Director: |%v|", ipVersion, backend)
+	}
+	return xdsBackendAddrs, nil
+}
+
 func main() {
 	flag.Parse()
 	infoLog.Println("Running dp_check.")
@@ -555,13 +1053,21 @@ func main() {
 		infoLog.Printf("At most one of --ipv4_only, --ipv6_only, or --ipv4_and_v6 can be set. Have --ipv4_only=%v --ipv6_only=%v --ipv4_and_v6=%v.", *ipv4Only, *ipv6Only, *ipv4AndV6)
 		os.Exit(1)
 	}
-	var balancerHost string
+	var skipXdsErr error
+	if !*checkXds {
+		skipXdsErr = fmt.Errorf("skip xds checks because of flag --check_xds is not set")
+	}
+	var balancerHostname string
 	var balancerPort string
 	if len(*balancerTargetOverride) > 0 {
 		infoLog.Printf("--balancer_target_override is non-empty. Will override load balancer target used in load balancer connectivity checks and queries to: %v", *balancerTargetOverride)
 		var err error
-		if balancerHost, balancerPort, err = net.SplitHostPort(*balancerTargetOverride); err != nil {
+		if balancerHostname, balancerPort, err = net.SplitHostPort(*balancerTargetOverride); err != nil {
 			infoLog.Printf("ERROR: --balancer_target_override was set to %v, but failed to split into host and port: %v", *balancerTargetOverride, err)
+			os.Exit(1)
+		}
+		if net.ParseIP(balancerHostname) != nil {
+			infoLog.Printf("ERROR: --balancer_target_override was set to %v, but this flag does not support IP literal based addresses, the host must be a DNS hostname", *balancerTargetOverride)
 			os.Exit(1)
 		}
 	}
@@ -600,6 +1106,19 @@ func main() {
 		return err
 	})
 
+	// Check if xds bootstrap environment variable is set
+	runCheck("Xds bootstrap environment variable", func() error {
+		if skipXdsErr != nil {
+			return &skipCheckError{err: skipXdsErr}
+		}
+		const xdsBootStrapEnvVar = "GRPC_XDS_BOOTSTRAP"
+		const xdsBootStrapConfigEnvVar = "GRPC_XDS_BOOTSTRAP_CONFIG"
+		if os.Getenv(xdsBootStrapEnvVar) != "" || os.Getenv(xdsBootStrapConfigEnvVar) != "" {
+			return fmt.Errorf("DirectPath can not be used with environment variables |%v| or |%v|", xdsBootStrapEnvVar, xdsBootStrapConfigEnvVar)
+		}
+		return nil
+	})
+
 	// Check DNS
 	srvQueriesSucceeded := false
 	runCheck("Service SRV DNS queries", func() error {
@@ -625,20 +1144,20 @@ See results of LB query below which may give help in diagnosing which case we fa
 			return fmt.Errorf("Got SRV record target:|%v|; expected:|%v| or |%v|", srvs[0].Target, loadBalancerIPv6OnlyDNS, loadBalancerDualstackDNS)
 		}
 		if len(*balancerTargetOverride) == 0 {
-			balancerHost = srvs[0].Target
-			if balancerHost == loadBalancerIPv6OnlyDNS && explicitChecks == 0 {
+			balancerHostname = srvs[0].Target
+			if balancerHostname == loadBalancerIPv6OnlyDNS && explicitChecks == 0 {
 				skipIPv4Err = fmt.Errorf("%v was detected to be an IPv6-only service because it's DirectPath SRV record pointed to: %v, so DirectPath/IPv4 does not need to work from this VM. Set the flag --ipv4_and_v6 if you want to run this check anyways", *service, loadBalancerIPv6OnlyDNS)
 			}
 			balancerPort = strconv.Itoa(int(srvs[0].Port))
 			infoLog.Println("--balancer_target_override is empty. Will use results from SRV record for the load balancer target used in load balancer connectivity checks and queries")
 		}
-		infoLog.Printf("Determined load balancer hostname:|%v| and port:|%v|", balancerHost, balancerPort)
+		infoLog.Printf("Determined load balancer hostname:|%v| and port:|%v|", balancerHostname, balancerPort)
 		srvQueriesSucceeded = true
 		return nil
 	})
-	if len(balancerHost) == 0 {
-		balancerHost = loadBalancerDualstackDNS
-		infoLog.Printf("SRV query for _grpclb._tcp.%s failed and --balancer_target_override is unset. Assuming (possible incorrectly) that the load balancer's hostname is %s", *service, balancerHost)
+	if len(balancerHostname) == 0 {
+		balancerHostname = loadBalancerDualstackDNS
+		infoLog.Printf("SRV query for _grpclb._tcp.%s failed and --balancer_target_override is unset. Assuming (possible incorrectly) that the load balancer's hostname is %s", *service, balancerHostname)
 	}
 	if len(balancerPort) == 0 {
 		balancerPort = strconv.Itoa(defaultLoadBalancerPort)
@@ -650,8 +1169,8 @@ See results of LB query below which may give help in diagnosing which case we fa
 			return &skipCheckError{err: skipIPv6Err}
 		}
 		var err error
-		infoLog.Printf("Resolve LB IPv6 addrs with:|new(net.Resolver).LookupIP(context.Background(), \"ip6\", \"%v\")|...", balancerHost)
-		if ipv6BalancerIPs, err = new(net.Resolver).LookupIP(context.Background(), "ip6", balancerHost); len(ipv6BalancerIPs) == 0 || err != nil {
+		infoLog.Printf("Resolve LB IPv6 addrs with:|new(net.Resolver).LookupIP(context.Background(), \"ip6\", \"%v\")|...", balancerHostname)
+		if ipv6BalancerIPs, err = new(net.Resolver).LookupIP(context.Background(), "ip6", balancerHostname); len(ipv6BalancerIPs) == 0 || err != nil {
 			return fmt.Errorf(`DNS resolution of load balancer IPv6 addresses failed: %v.
 This is unexpected for both IPv6-only and dualstack DirectPath services. Either this VM doesn't have DirectPath access, or there is a bug that may be causing a larger outage`, err)
 		}
@@ -666,12 +1185,12 @@ This is unexpected for both IPv6-only and dualstack DirectPath services. Either 
 			return &skipCheckError{err: skipIPv4Err}
 		}
 		var err error
-		infoLog.Printf("Resolve LB IPv6 addrs with:|new(net.Resolver).LookupIP(context.Background(), \"ip4\", \"%v\")|...", balancerHost)
-		ipv4BalancerIPs, err = new(net.Resolver).LookupIP(context.Background(), "ip4", balancerHost)
+		infoLog.Printf("Resolve LB IPv6 addrs with:|new(net.Resolver).LookupIP(context.Background(), \"ip4\", \"%v\")|...", balancerHostname)
+		ipv4BalancerIPs, err = new(net.Resolver).LookupIP(context.Background(), "ip4", balancerHostname)
 		// Fail this check if either:
 		// a) we expect to resolve LB IPv4 endpoints but don't
 		// b) we don't expect to resolve LB IPv4 endpoint but do
-		if strings.Compare(balancerHost, loadBalancerDualstackDNS) == 0 {
+		if strings.Compare(balancerHostname, loadBalancerDualstackDNS) == 0 {
 			if len(ipv4BalancerIPs) == 0 || err != nil {
 				return fmt.Errorf(`DNS resolution of load balancer IPv4 addresses failed: %v.
 This is unexpected for dualstack DirectPath services. Either this VM doesn't have DirectPath access, or there is a bug that may be causing a larger outage`, err)
@@ -683,7 +1202,7 @@ This is unexpected for dualstack DirectPath services. Either this VM doesn't hav
 			if len(ipv4BalancerIPs) > 0 {
 				return fmt.Errorf(`the DNS resolution of load balancer IPv4 addresses succeeded, but %v is not expected
 to be a dualstack service because we resolver load balancer hostname:|%v| which does not match the dualstack load balancer hostname:|%v|,
-this indicates a possible bug that may be causing a larger outage`, balancerHost, loadBalancerDualstackDNS, *service)
+this indicates a possible bug that may be causing a larger outage`, balancerHostname, loadBalancerDualstackDNS, *service)
 			}
 		}
 		return nil
@@ -764,7 +1283,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 			return fmt.Errorf("Skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
 		}
 		var err error
-		ipv6BackendAddrs, err = resolveBackends(net.JoinHostPort(ipv6BalancerIPs[0].String(), balancerPort), srvQueriesSucceeded)
+		ipv6BackendAddrs, err = resolveBackends(net.JoinHostPort(ipv6BalancerIPs[0].String(), balancerPort), balancerHostname, srvQueriesSucceeded)
 		return err
 	})
 	var ipv4BackendAddrs []string
@@ -776,7 +1295,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 			return fmt.Errorf("Skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
 		}
 		var err error
-		ipv4BackendAddrs, err = resolveBackends(net.JoinHostPort(ipv4BalancerIPs[0].String(), balancerPort), srvQueriesSucceeded)
+		ipv4BackendAddrs, err = resolveBackends(net.JoinHostPort(ipv4BalancerIPs[0].String(), balancerPort), balancerHostname, srvQueriesSucceeded)
 		return err
 	})
 
@@ -831,5 +1350,99 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		infoLog.Println("Check secure connectivity to IPv4 backends by attempting to complete all handshakes involved in the setup of a gRPC/ALTS connection to", ipv4BackendAddrs[0])
 		return checkSecureConnectivityToBackend(ipv4BackendAddrs[0])
 	})
+
+	// xds
+	var xdsIPv6BackendAddrs []string
+	runCheck("Get IPv6 backend addresses from Traffic Director", func() error {
+		if skipXdsErr != nil {
+			return &skipCheckError{err: skipXdsErr}
+		}
+		if skipIPv6Err != nil {
+			return &skipCheckError{err: skipIPv6Err}
+		}
+		var err error
+		xdsIPv6BackendAddrs, err = getBackendAddrsFromTrafficDirector(true)
+		return err
+	})
+
+	var xdsIPv4BackendAddrs []string
+	runCheck("Get IPv4 backend addresses from Traffic Director", func() error {
+		if skipXdsErr != nil {
+			return &skipCheckError{err: skipXdsErr}
+		}
+		if skipIPv4Err != nil {
+			return &skipCheckError{err: skipIPv4Err}
+		}
+		var err error
+		xdsIPv4BackendAddrs, err = getBackendAddrsFromTrafficDirector(false)
+		return err
+	})
+
+	xdsTCPConnectivityToIpv6BackendSucceeded := false
+	runCheck("TCP connectivity to IPv6 backends from Traffic Director", func() error {
+		if skipXdsErr != nil {
+			return &skipCheckError{err: skipXdsErr}
+		}
+		if skipIPv6Err != nil {
+			return &skipCheckError{err: skipIPv6Err}
+		}
+		if len(xdsIPv6BackendAddrs) == 0 {
+			return fmt.Errorf("Skipping TCP connectivity to IPv6 backends because discovery of IPv6 backends failed")
+		}
+		infoLog.Printf("Check TCP connectivity to IPv6 backends with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", xdsIPv6BackendAddrs[0])
+		if _, err := net.DialTimeout("tcp", xdsIPv6BackendAddrs[0], time.Second*5); err != nil {
+			return fmt.Errorf("TCP connectivity to backend addr - %v failed: %v", xdsIPv6BackendAddrs[0], err)
+		}
+		xdsTCPConnectivityToIpv6BackendSucceeded = true
+		return nil
+	})
+
+	xdsTCPConnectivityToIpv4BackendSucceeded := false
+	runCheck("TCP connectivity to IPv4 backends from Traffic Director", func() error {
+		if skipXdsErr != nil {
+			return &skipCheckError{err: skipXdsErr}
+		}
+		if skipIPv4Err != nil {
+			return &skipCheckError{err: skipIPv4Err}
+		}
+		if len(xdsIPv4BackendAddrs) == 0 {
+			return fmt.Errorf("skipping TCP connectivity to IPv4 backends because discovery of IPv4 backends failed")
+		}
+		infoLog.Printf("Check TCP connectivity to IPv4 backends with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", xdsIPv4BackendAddrs[0])
+		if _, err := net.DialTimeout("tcp", xdsIPv4BackendAddrs[0], time.Second*5); err != nil {
+			return fmt.Errorf("TCP connectivity to backend addr - %v failed: %v", xdsIPv4BackendAddrs[0], err)
+		}
+		xdsTCPConnectivityToIpv4BackendSucceeded = true
+		return nil
+	})
+
+	runCheck("Secure connectivity to IPv6 backends from Traffic Director", func() error {
+		if skipXdsErr != nil {
+			return &skipCheckError{err: skipXdsErr}
+		}
+		if skipIPv6Err != nil {
+			return &skipCheckError{err: skipIPv6Err}
+		}
+		if !xdsTCPConnectivityToIpv6BackendSucceeded {
+			return fmt.Errorf("skipping secure connectivity to IPv6 backends because TCP connectivity to IPv6 backends did not succeed")
+		}
+		infoLog.Println("Check secure connectivity to IPv6 backends by attempting to complete all handshakes involved in the setup of a gRPC/ALTS connection to", xdsIPv6BackendAddrs[0])
+		return checkSecureConnectivityToBackend(xdsIPv6BackendAddrs[0])
+	})
+
+	runCheck("Secure connectivity to IPv4 backends from Traffic Director", func() error {
+		if skipXdsErr != nil {
+			return &skipCheckError{err: skipXdsErr}
+		}
+		if skipIPv4Err != nil {
+			return &skipCheckError{err: skipIPv4Err}
+		}
+		if !xdsTCPConnectivityToIpv4BackendSucceeded {
+			return fmt.Errorf("skipping secure connectivity to IPv4 backends because TCP connectivity to IPv4 backends did not succeed")
+		}
+		infoLog.Println("Check secure connectivity to IPv4 backends by attempting to complete all handshakes involved in the setup of a gRPC/ALTS connection to", xdsIPv4BackendAddrs[0])
+		return checkSecureConnectivityToBackend(xdsIPv4BackendAddrs[0])
+	})
+
 	os.Exit(failureCount)
 }
