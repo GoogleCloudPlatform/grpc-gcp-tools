@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+enum SeverityLevel {
+  SEVERITY_LEVEL_UNSPECIFIED = 0;
+  SEVERITY_LEVEL_TRACE  = 1;
+  SEVERITY_LEVEL_DEBUG  = 2;
+  SEVERITY_LEVEL_INFO   = 3;
+  SEVERITY_LEVEL_WARN   = 4;
+  SEVERITY_LEVEL_ERROR  = 5;
+  SEVERITY_LEVEL_FATAL  = 6;
+}
+
+enum EventType {
+  EVENT_TYPE_UNKNOWN = 0;
+  EVENT_TYPE_REQUEST_HEADER = 1; // SEVERITY_LEVEL_DEBUG
+  EVENT_TYPE_RESPONSE_HEADER = 2; // SEVERITY_LEVEL_DEBUG
+  EVENT_TYPE_REQUEST_MESSAGE = 3; // SEVERITY_LEVEL_DEBUG
+  EVENT_TYPE_RESPONSE_MESSAGE = 4; // SEVERITY_LEVEL_DEBUG
+  EVENT_TYPE_REQUEST_HALF_CLOSE = 5; // SEVERITY_LEVEL_DEBUG
+  EVENT_TYPE_RESPONSE_TRAILER = 6; // SEVERITY_LEVEL_DEBUG
+  EVENT_TYPE_CANCEL = 7; // SEVERITY_LEVEL_DEBUG
+  EVENT_TYPE_CHANNEL_CREATED = 8; // SEVERITY_LEVEL_INFO
+  EVENT_TYPE_CHANNEL_STATE_CHANGE = 9; // SEVERITY_LEVEL_INFO
+  EVENT_TYPE_CHANNEL_SHUTDOWN = 10; // SEVERITY_LEVEL_INFO
+  EVENT_TYPE_REQUEST_READ = 11; // SEVERITY_LEVEL_TRACE
+  EVENT_TYPE_RESPONSE_READ = 12; // SEVERITY_LEVEL_TRACE
+  EVENT_TYPE_REQUEST_WRITE = 13; // SEVERITY_LEVEL_TRACE
+  EVENT_TYPE_RESPONSE_WRITE = 14; // SEVERITY_LEVEL_TRACE
+  EVENT_TYPE_ERROR = 15; // SEVERITY_LEVEL_ERROR
+}
+
+enum ChannelState {
+  CHANNEL_STATE_UNKNOWN = 0;
+  CHANNEL_STATE_CONNECTING = 1;
+  CHANNEL_STATE_READY = 2;
+  CHANNEL_STATE_TRANSIENT_FAILURE = 3;
+  CHANNEL_STATE_IDLE = 4;
+  CHANNEL_STATE_SHUTDOWN = 5;
+}
+
+message GrpcLogRecord {
+  google.protobuf.Timestamp timestamp = 1;
+  EventType type = 2;
+  ChannelState channel_state = 3;
+  SeverityLevel severity_level = 4;
+  string service_name = 5;
+  string method_name = 6;
+  oneof payload {
+    RequestHeader request_header = 11;
+    ResponseHeader response_header = 12;
+    Message message = 13;
+    Trailer trailer = 14;
+    RpcError rpc_error = 15;
+  }
+  bool payload_truncated = 21;
+  Address peer = 22;
+};
+
+message RequestHeader {
+  Metadata metadata = 1;
+  google.protobuf.Duration timeout = 4;
+}
+
+message ResponseHeader {
+  Metadata metadata = 1;
+}
+
+message RpcError {
+  uint32 error_code = 1;
+  string error_message = 2;
+  bytes error_details = 3;
+}
+
+message Trailer {
+  Metadata metadata = 1;
+  uint32 status_code = 2;
+  string status_message = 3;
+  bytes status_details = 4;
+}
+
+message Message {
+  uint32 length = 1;
+  bytes data = 2;
+}
+
+message Metadata {
+  repeated MetadataEntry entry = 1;
+}
+
+message MetadataEntry {
+  string key = 1;
+  bytes value = 2;
+}
+
+message Address {
+  enum Type {
+    TYPE_UNKNOWN = 0;
+    TYPE_IPV4 = 1;
+    TYPE_IPV6 = 2;
+    TYPE_UNIX = 3;
+  };
+  Type type = 1;
+  string address = 2;
+  uint32 ip_port = 3;
+}
