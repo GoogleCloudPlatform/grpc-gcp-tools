@@ -113,7 +113,7 @@ const (
 
 	trafficDirectorPort             = "443"
 	userAgentName                   = "dp-check"
-	userAgentVersion                = "1.5-dev"
+	userAgentVersion                = "1.5"
 	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
 	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
 	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
