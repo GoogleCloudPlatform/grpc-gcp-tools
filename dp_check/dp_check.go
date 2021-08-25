@@ -87,7 +87,7 @@ to e.g. DirectPath networking and load balancing, in such a way that ignores DNS
 in conjunction with --skip="Service SRV DNS queries".`)
 	checkXds                = flag.Bool("check_xds", false, `Optional. Add extra checks to get backend addresses from Traffic Director.`)
 	userAgent               = flag.String("user_agent", "", "Optional. The user agent header to use on RPCs to the load balancer")
-	trafficDirectorHostname = flag.String("td_hostname", "staging-directpath-pa.sandbox.googleapis.com", `Optional. Override the Traffic Director hostname. Do not include a port number.`)
+	trafficDirectorHostname = flag.String("td_hostname", "directpath-pa.googleapis.com", `Optional. Override the Traffic Director hostname. Do not include a port number.`)
 	infoLog                 = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 	failureCount            int
 	runningOS               = runtime.GOOS
@@ -112,7 +112,8 @@ const (
 	powershellOutputFilter   = "Manufacturer"
 
 	trafficDirectorPort             = "443"
-	gRPCUserAgentName               = "grpc-go"
+	userAgentName                   = "dp-check"
+	userAgentVersion                = "1.5-dev"
 	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
 	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
 	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
@@ -845,9 +846,6 @@ func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, er
 	if countPriorityZero != 1 {
 		return []string{}, fmt.Errorf("expected to receive exactly 1 endpoint with priority 0, but received %v", countPriorityZero)
 	}
-	if countPriorityOne > 2 {
-		return []string{}, fmt.Errorf("expected to receive at most 2 endpoints with priority 1, but received %v", countPriorityOne)
-	}
 	if countPriorityOthers != 0 {
 		return []string{}, fmt.Errorf("received endpoint whose priority is not 0 or 1")
 	}
@@ -859,10 +857,9 @@ func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, er
 
 func newNode(id, zone string, ipv6Capable bool) *v3corepb.Node {
 	ret := &v3corepb.Node{
-		Id: id,
-		// QQQ: do we need the following field for dp_check?
-		UserAgentName:        gRPCUserAgentName,
-		UserAgentVersionType: &v3corepb.Node_UserAgentVersion{UserAgentVersion: grpc.Version},
+		Id:                   id,
+		UserAgentName:        userAgentName,
+		UserAgentVersionType: &v3corepb.Node_UserAgentVersion{UserAgentVersion: userAgentVersion},
 		ClientFeatures:       []string{clientFeatureNoOverprovisioning},
 	}
 	ret.Locality = &v3corepb.Locality{Zone: zone}
