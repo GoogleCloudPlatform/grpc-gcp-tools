@@ -53,6 +53,7 @@ import (
 	"google.golang.org/grpc/credentials/alts"
 	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	v3clusterpb "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	v3corepb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -111,6 +112,7 @@ const (
 	windowsCheckCommandArgs  = "Get-WmiObject -Class Win32_BIOS"
 	powershellOutputFilter   = "Manufacturer"
 
+	jsonIndent                      = "  "
 	trafficDirectorPort             = "443"
 	userAgentName                   = "dp-check"
 	userAgentVersion                = "1.5"
@@ -617,7 +619,15 @@ func sendXdsRequest(stream adsStream, node *v3corepb.Node, typeURL, resourceName
 	if err != nil {
 		return nil, fmt.Errorf("failed to receive %v response: %v", requestName, err)
 	}
-	infoLog.Printf("Successfully received %v reply: |%+v|.", requestName, xdsReply)
+	mm := protojson.MarshalOptions{
+		Multiline: true,
+		Indent:    jsonIndent,
+	}
+	if encodeXdsReply, err := mm.Marshal(xdsReply); err != nil {
+		infoLog.Printf("Successfully received %v reply: |%+v|.", requestName, xdsReply)
+	} else {
+		infoLog.Printf("Successfully received %v reply: |%+v|.", requestName, string(encodeXdsReply))
+	}
 	versionInfoMap[typeURL] = xdsReply.GetVersionInfo()
 	nonceMap[typeURL] = xdsReply.GetNonce()
 	if err = ackXdsResponse(stream, node, typeURL, resourceName, versionInfoMap, nonceMap); err != nil {
