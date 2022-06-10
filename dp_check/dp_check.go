@@ -43,7 +43,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/vishvananda/netlink"
 	"google.golang.org/grpc"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
@@ -53,12 +52,17 @@ import (
 	"google.golang.org/grpc/credentials/alts"
 	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
+	_ "github.com/GoogleCloudPlatform/grpc-gcp-tools/proto/grpc_lookup_v1"
 	v3clusterpb "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	v3corepb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	v3endpointpb "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	v3listenerpb "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	v3clusterextpb "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/aggregate/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/fault/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	v3httppb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	v3adsgrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	v3discoverypb "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -85,12 +89,14 @@ Note that this is an unstable API because check names are prone to change, prefe
 port number, of the load balancer. This is mainly useful if one would like to check the proper setup of a VM and service with respect
 to e.g. DirectPath networking and load balancing, in such a way that ignores DNS SRV resolution. In most use cases, it would be desirable to set this
 in conjunction with --skip="Service SRV DNS queries".`)
-	checkXds                = flag.Bool("check_xds", false, `Optional. Add extra checks to get backend addresses from Traffic Director.`)
-	userAgent               = flag.String("user_agent", "", "Optional. The user agent header to use on RPCs to the load balancer")
-	trafficDirectorHostname = flag.String("td_hostname", "directpath-pa.googleapis.com", `Optional. Override the Traffic Director hostname. Do not include a port number.`)
-	infoLog                 = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
-	failureCount            int
-	runningOS               = runtime.GOOS
+	checkGrpclb                 = flag.Bool("check_grpclb", true, `Optional. Perform checks related to getting backend addresses from grpclb.`)
+	checkXds                    = flag.Bool("check_xds", false, `Optional. Add extra checks to get backend addresses from Traffic Director.`)
+	userAgent                   = flag.String("user_agent", "", "Optional. The user agent header to use on RPCs to the load balancer")
+	trafficDirectorHostname     = flag.String("td_hostname", "directpath-pa.googleapis.com", `Optional. Override the Traffic Director hostname. Do not include a port number.`)
+	xdsExpectFallbackConfigured = flag.Bool("xds_expect_fallback_configured", true, "Optional. Whether or not we expect CFE fallback to be configured for this service in Traffic Director.")
+	infoLog                     = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+	failureCount                int
+	runningOS                   = runtime.GOOS
 )
 
 type adsStream v3adsgrpc.AggregatedDiscoveryService_StreamAggregatedResourcesClient
@@ -102,6 +108,7 @@ func (k platformError) Error() string {
 }
 
 const (
+	jsonIndent               = "  "
 	loadBalancerIPv6OnlyDNS  = "grpclb.directpath.google.internal."
 	loadBalancerDualstackDNS = "grpclb-dualstack.directpath.google.internal."
 	defaultLoadBalancerPort  = 9355
@@ -113,7 +120,7 @@ const (
 
 	trafficDirectorPort             = "443"
 	userAgentName                   = "dp-check"
-	userAgentVersion                = "1.5"
+	userAgentVersion                = "1.6"
 	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
 	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
 	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
@@ -617,7 +624,15 @@ func sendXdsRequest(stream adsStream, node *v3corepb.Node, typeURL, resourceName
 	if err != nil {
 		return nil, fmt.Errorf("failed to receive %v response: %v", requestName, err)
 	}
-	infoLog.Printf("Successfully received %v reply: |%+v|.", requestName, xdsReply)
+	mm := protojson.MarshalOptions{
+		Multiline: true,
+		Indent:    jsonIndent,
+	}
+	encodeXdsReply, err := mm.Marshal(xdsReply)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pretty-print %v response: %v", requestName, err)
+	}
+	infoLog.Printf("Successfully received %v reply: |%+v|.", requestName, string(encodeXdsReply))
 	versionInfoMap[typeURL] = xdsReply.GetVersionInfo()
 	nonceMap[typeURL] = xdsReply.GetNonce()
 	if err = ackXdsResponse(stream, node, typeURL, resourceName, versionInfoMap, nonceMap); err != nil {
@@ -732,7 +747,7 @@ func processAggregateClusterResponse(cdsReply *v3discoverypb.DiscoveryResponse, 
 		return []string{}, fmt.Errorf("failed to get aggregate cluster from CDS response: %v", err)
 	}
 	if aggregateCluster.GetClusterType() == nil || aggregateCluster.GetClusterType().GetName() != "envoy.clusters.aggregate" {
-		return []string{}, fmt.Errorf("failed to receive an aggregate cluster from Traffic Director")
+		return []string{}, fmt.Errorf("failed to receive an aggregate cluster from Traffic Director, set --xds_expect_fallback_configured=false if CFE fallback has been intentionally disabled for this service")
 	}
 	clusterConfig := &v3clusterextpb.ClusterConfig{}
 	if err := proto.Unmarshal(aggregateCluster.GetClusterType().GetTypedConfig().GetValue(), clusterConfig); err != nil {
@@ -757,7 +772,7 @@ func processEdsClusterResponse(cdsReply *v3discoverypb.DiscoveryResponse, cluste
 		return "", fmt.Errorf("failed to get EDS cluster from CDS response: %v", err)
 	}
 	if edsCluster.GetType() != v3clusterpb.Cluster_EDS {
-		return "", fmt.Errorf("the cluster type is expected to be LOGICAL_DNS, but it is: %v", edsCluster.GetType())
+		return "", fmt.Errorf("the cluster type is expected to be EDS, but it is: %v, set --xds_expect_fallback_configured=true if CFE fallback is expected to be configured for this service", edsCluster.GetType())
 	}
 	// The cluster lbPolicy field must be Round Robin or Ring Hash
 	if edsCluster.GetLbPolicy() != v3clusterpb.Cluster_ROUND_ROBIN && edsCluster.GetLbPolicy() != v3clusterpb.Cluster_RING_HASH {
@@ -829,10 +844,6 @@ func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, er
 		switch endpoint.GetPriority() {
 		case 0:
 			countPriorityZero++
-			if endpoint.GetLoadBalancingWeight().GetValue() != uint32(100) {
-				infoLog.Printf("the endpoint with priority 0 is expected to have load_balancing_weight 100, but it is: %v, skip", endpoint.GetLoadBalancingWeight())
-				continue
-			}
 			for _, lbendpoint := range endpoint.GetLbEndpoints() {
 				endpoint := lbendpoint.GetEndpoint().GetAddress().GetSocketAddress()
 				results = append(results, net.JoinHostPort(endpoint.GetAddress(), fmt.Sprint(endpoint.GetPortValue())))
@@ -843,8 +854,8 @@ func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, er
 			countPriorityOthers++
 		}
 	}
-	if countPriorityZero != 1 {
-		return []string{}, fmt.Errorf("expected to receive exactly 1 endpoint with priority 0, but received %v", countPriorityZero)
+	if countPriorityZero == 0 {
+		return []string{}, fmt.Errorf("expected to receive at least 1 endpoint with priority 0, but received %v", countPriorityZero)
 	}
 	if countPriorityOthers != 0 {
 		return []string{}, fmt.Errorf("received endpoint whose priority is not 0 or 1")
@@ -924,36 +935,45 @@ func checkLDS(stream adsStream, node *v3corepb.Node, versionInfoMap, nonceMap ma
 	return clusterName, nil
 }
 
-func checkCDS(stream adsStream, node *v3corepb.Node, aggregateClusterName string, versionInfoMap, nonceMap map[string]string) (string, error) {
+func checkCDS(stream adsStream, node *v3corepb.Node, clusterName string, versionInfoMap, nonceMap map[string]string) (string, error) {
 	// check aggregate cluster
-	aggregatedClusterReply, err := sendXdsRequest(stream, node, V3ClusterURL, aggregateClusterName, versionInfoMap, nonceMap)
+	cdsReply, err := sendXdsRequest(stream, node, V3ClusterURL, clusterName, versionInfoMap, nonceMap)
 	if err != nil {
-		return "", fmt.Errorf("fail to send aggregate cluster request: %v", err)
+		return "", fmt.Errorf("fail to send CDS request: %v", err)
 	}
-	clusters, err := processAggregateClusterResponse(aggregatedClusterReply, aggregateClusterName)
-	if err != nil {
-		return "", fmt.Errorf("fail to process aggregate cluster response: %v", err)
+	var edsClusterName string
+	var edsClusterReply *v3discoverypb.DiscoveryResponse
+	if *xdsExpectFallbackConfigured {
+		clusters, err := processAggregateClusterResponse(cdsReply, clusterName)
+		if err != nil {
+			return "", fmt.Errorf("fail to process aggregate cluster response: %v", err)
+		}
+		infoLog.Printf("Received primary cluster for DirectPath: %v", clusters[0])
+		infoLog.Printf("Received secondary cluster for fallback to CFE: %v", clusters[1])
+		// check primary cluster
+		var edsClusterErr error
+		edsClusterName = clusters[0]
+		edsClusterReply, edsClusterErr = sendXdsRequest(stream, node, V3ClusterURL, edsClusterName, versionInfoMap, nonceMap)
+		if edsClusterErr != nil {
+			return "", fmt.Errorf("fail to send EDS cluster request: %v", err)
+		}
+		// check secondary cluster
+		dnsClusterReply, err := sendXdsRequest(stream, node, V3ClusterURL, clusters[1], versionInfoMap, nonceMap)
+		if err != nil {
+			return "", fmt.Errorf("fail to send DNS cluster request: %v", err)
+		}
+		if err = processDNSClusterResponse(dnsClusterReply, clusters[1]); err != nil {
+			return "", fmt.Errorf("fail to process DNS cluster response: %v", err)
+		}
+	} else {
+		edsClusterName = clusterName
+		edsClusterReply = cdsReply
 	}
-	infoLog.Printf("Received primary cluster for DirectPath: %v", clusters[0])
-	infoLog.Printf("Received secondary cluster for fallback to CFE: %v", clusters[1])
-	// check primary cluster
-	edsClusterReply, err := sendXdsRequest(stream, node, V3ClusterURL, clusters[0], versionInfoMap, nonceMap)
-	if err != nil {
-		return "", fmt.Errorf("fail to send EDS cluster request: %v", err)
-	}
-	serviceName, err := processEdsClusterResponse(edsClusterReply, clusters[0])
+	serviceName, err := processEdsClusterResponse(edsClusterReply, edsClusterName)
 	if err != nil {
 		return "", fmt.Errorf("fail to process EDS cluster response: %v", err)
 	}
 	infoLog.Printf("Successfully extract service_name from CDS response: |%v|", serviceName)
-	// check secondary cluster
-	dnsClusterReply, err := sendXdsRequest(stream, node, V3ClusterURL, clusters[1], versionInfoMap, nonceMap)
-	if err != nil {
-		return "", fmt.Errorf("fail to send DNS cluster request: %v", err)
-	}
-	if err = processDNSClusterResponse(dnsClusterReply, clusters[1]); err != nil {
-		return "", fmt.Errorf("fail to process DNS cluster response: %v", err)
-	}
 	return serviceName, nil
 }
 
@@ -1000,12 +1020,12 @@ func getBackendAddrsFromTrafficDirector(ipv6Capable bool) ([]string, error) {
 		V3EndpointsURL:   "",
 	}
 	// LDS
-	aggregateClusterName, err := checkLDS(stream, node, versionInfoMap, nonceMap)
+	clusterName, err := checkLDS(stream, node, versionInfoMap, nonceMap)
 	if err != nil {
 		return []string{}, fmt.Errorf("LDS failed: %v", err)
 	}
 	// CDS
-	serviceName, err := checkCDS(stream, node, aggregateClusterName, versionInfoMap, nonceMap)
+	serviceName, err := checkCDS(stream, node, clusterName, versionInfoMap, nonceMap)
 	if err != nil {
 		return []string{}, fmt.Errorf("CDS failed: %v", err)
 	}
@@ -1050,9 +1070,13 @@ func main() {
 		infoLog.Printf("At most one of --ipv4_only, --ipv6_only, or --ipv4_and_v6 can be set. Have --ipv4_only=%v --ipv6_only=%v --ipv4_and_v6=%v.", *ipv4Only, *ipv6Only, *ipv4AndV6)
 		os.Exit(1)
 	}
+	var skipGrpclbErr error
+	if !*checkGrpclb {
+		skipGrpclbErr = fmt.Errorf("skip grpclb related checks because --check_grpclb is false")
+	}
 	var skipXdsErr error
 	if !*checkXds {
-		skipXdsErr = fmt.Errorf("skip xds checks because of flag --check_xds is not set")
+		skipXdsErr = fmt.Errorf("skip xds related checks because --check_xds is false")
 	}
 	var balancerHostname string
 	var balancerPort string
@@ -1119,6 +1143,7 @@ func main() {
 	// Check DNS
 	srvQueriesSucceeded := false
 	runCheck("Service SRV DNS queries", func() error {
+		// TODO(apolcyn): Ideally we'd skip this if --check_grpclb=false, but we need it to autodetect the IPv6-only vs. dualstack status of the service.
 		infoLog.Printf("Lookup service SRV records with:|net.DefaultResolver.LoookupSRV(context.Background(), \"grpclb\", \"tcp\", \"%v\")|...", *service)
 		_, srvs, err := net.DefaultResolver.LookupSRV(context.Background(), "grpclb", "tcp", *service)
 		if err != nil || len(srvs) == 0 {
@@ -1165,6 +1190,9 @@ See results of LB query below which may give help in diagnosing which case we fa
 		if skipIPv6Err != nil {
 			return &skipCheckError{err: skipIPv6Err}
 		}
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
+		}
 		var err error
 		infoLog.Printf("Resolve LB IPv6 addrs with:|new(net.Resolver).LookupIP(context.Background(), \"ip6\", \"%v\")|...", balancerHostname)
 		if ipv6BalancerIPs, err = new(net.Resolver).LookupIP(context.Background(), "ip6", balancerHostname); len(ipv6BalancerIPs) == 0 || err != nil {
@@ -1181,6 +1209,7 @@ This is unexpected for both IPv6-only and dualstack DirectPath services. Either 
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
 		}
+		// TODO(apolcyn): Ideally we'd skip this if --check_grpclb=false, but we need it to perform local IPv4 routing checks
 		var err error
 		infoLog.Printf("Resolve LB IPv6 addrs with:|new(net.Resolver).LookupIP(context.Background(), \"ip4\", \"%v\")|...", balancerHostname)
 		ipv4BalancerIPs, err = new(net.Resolver).LookupIP(context.Background(), "ip4", balancerHostname)
@@ -1242,6 +1271,9 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		if skipIPv6Err != nil {
 			return &skipCheckError{err: skipIPv6Err}
 		}
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
+		}
 		if len(ipv6BalancerIPs) == 0 {
 			return fmt.Errorf("Skipping \"TCP/IPv6 connectivity to load balancers\" because prior DNS resolution of LB IPv6 address failed")
 		}
@@ -1257,6 +1289,9 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 	runCheck("TCP/IPv4 connectivity to load balancers", func() error {
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
+		}
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
 		}
 		if len(ipv4BalancerIPs) == 0 {
 			return fmt.Errorf("Skipping \"TCP/IPv4 connectivity to load balancers\" because prior DNS resolution of LB IPv4 address failed")
@@ -1276,6 +1311,9 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		if skipIPv6Err != nil {
 			return &skipCheckError{err: skipIPv6Err}
 		}
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
+		}
 		if !tcpOverIPv6ToLoadBalancersSucceeded {
 			return fmt.Errorf("Skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
 		}
@@ -1287,6 +1325,9 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 	runCheck("Discovery of IPv4 backends via load balancers", func() error {
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
+		}
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
 		}
 		if !tcpOverIPv4ToLoadBalancersSucceeded {
 			return fmt.Errorf("Skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
@@ -1301,6 +1342,9 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 	runCheck("TCP connectivity to IPv6 backends", func() error {
 		if skipIPv6Err != nil {
 			return &skipCheckError{err: skipIPv6Err}
+		}
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
 		}
 		if len(ipv6BackendAddrs) == 0 {
 			return fmt.Errorf("Skipping TCP connectivity to IPv6 backends because discovery of IPv6 backends failed")
@@ -1317,6 +1361,9 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
 		}
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
+		}
 		if len(ipv4BackendAddrs) == 0 {
 			return fmt.Errorf("skipping TCP connectivity to IPv4 backends because discovery of IPv4 backends failed")
 		}
@@ -1331,6 +1378,9 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		if skipIPv6Err != nil {
 			return &skipCheckError{err: skipIPv6Err}
 		}
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
+		}
 		if !tcpConnectivityToIpv6BackendSucceeded {
 			return fmt.Errorf("skipping secure connectivity to IPv6 backends because TCP connectivity to IPv6 backends did not succeed")
 		}
@@ -1340,6 +1390,9 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 	runCheck("Secure connectivity to IPv4 backends", func() error {
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
+		}
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
 		}
 		if !tcpConnectivityToIpv4BackendSucceeded {
 			return fmt.Errorf("skipping secure connectivity to IPv4 backends because TCP connectivity to IPv4 backends did not succeed")
