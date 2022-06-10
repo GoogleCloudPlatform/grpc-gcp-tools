@@ -43,6 +43,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/golang/protobuf/v2/encoding/protojson/protojson"
+	"github.com/golang/protobuf/v2/proto/proto"
+	"github.com/vishvananda/netlink/netlink"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1/grpc_lb_v1"
 	"google.golang.org/grpc/codes/codes"
 	"google.golang.org/grpc/connectivity/connectivity"
@@ -51,11 +54,7 @@ import (
 	"google.golang.org/grpc/credentials/oauth/oauth"
 	"google.golang.org/grpc/grpc"
 	"google.golang.org/grpc/status/status"
-	"github.com/vishvananda/netlink/netlink"
-	"github.com/golang/protobuf/v2/encoding/protojson/protojson"
-	"github.com/golang/protobuf/v2/proto/proto"
 
-	structpb "google.golang.org/protobuf/struct_go_proto"
 	v3clusterpb "github.com/envoyproxy/go-control-plane/envoy/src/api/envoy/config/cluster/v3/pkg_go_proto"
 	v3corepb "github.com/envoyproxy/go-control-plane/envoy/src/api/envoy/config/core/v3/pkg_go_proto"
 	v3endpointpb "github.com/envoyproxy/go-control-plane/envoy/src/api/envoy/config/endpoint/v3/pkg_go_proto"
@@ -67,6 +66,7 @@ import (
 	v3adsgrpc "github.com/envoyproxy/go-control-plane/envoy/src/api/envoy/service/discovery/v3/pkg_go_grpc"
 	v3discoverypb "github.com/envoyproxy/go-control-plane/envoy/src/api/envoy/service/discovery/v3/pkg_go_proto"
 	_ "google.golang.org/grpc/internal/proto/grpc_lookup_v1/grpc_lookup_v1"
+	structpb "google.golang.org/protobuf/struct_go_proto"
 )
 
 var (
