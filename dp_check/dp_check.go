@@ -65,7 +65,7 @@ import (
 	v3httppb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	v3adsgrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	v3discoverypb "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
-	_ "google.golang.org/grpc/internal/proto/grpc_lookup_v1"
+	_ "github.com/GoogleCloudPlatform/grpc-gcp-tools/proto/grpc_lookup_v1"
 	structpb "google.golang.org/protobuf/types/known/structpb"
 )
 
