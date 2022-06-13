@@ -689,7 +689,7 @@ func processLdsResponse(ldsReply *v3discoverypb.DiscoveryResponse) (string, erro
 				infoLog.Printf("no domain received in this virtual_host, skip this virtual_host")
 				continue
 			}
-			if vh.GetDomains()[0] != *service {
+			if vh.GetDomains()[0] != "*" && vh.GetDomains()[0] != *service {
 				infoLog.Printf("received a virtual_host whose domain is |%v|, which does not match |%v|, skip this virtual_host", vh.GetDomains()[0], *service)
 				continue
 			}
