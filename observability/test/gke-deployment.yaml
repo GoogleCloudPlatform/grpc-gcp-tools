@@ -1,0 +1,151 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grpc-server-ns-${JOB_MODE}
+  labels:
+    environment: dev
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grpc-client-ns-${JOB_MODE}
+  labels:
+    environment: dev
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grpc-server-sa-${JOB_MODE}
+  namespace: grpc-server-ns-${JOB_MODE}
+  annotations:
+    iam.gke.io/gcp-service-account: ${PROJNUM}-compute@developer.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grpc-client-sa-${JOB_MODE}
+  namespace: grpc-client-ns-${JOB_MODE}
+  annotations:
+    iam.gke.io/gcp-service-account: ${PROJNUM}-compute@developer.gserviceaccount.com
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: appconfig
+  namespace: grpc-server-ns-${JOB_MODE}
+data:
+  GRPC_GCP_OBSERVABILITY_CONFIG: |
+    {
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: appconfig
+  namespace: grpc-client-ns-${JOB_MODE}
+data:
+  GRPC_GCP_OBSERVABILITY_CONFIG: |
+    {
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc-server-svc-${JOB_MODE}
+  namespace: grpc-server-ns-${JOB_MODE}
+  labels:
+    k8s-app: grpc-server-app-${JOB_MODE}
+spec:
+  ports:
+  - name: helloworld
+    port: 8080
+    protocol: TCP
+    targetPort: 50051
+  selector:
+    k8s-app: example-grpc-server-${JOB_MODE}
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpc-server-pod-${JOB_MODE}
+  namespace: grpc-server-ns-${JOB_MODE}
+  labels:
+    k8s-app: grpc-server-app-${JOB_MODE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: grpc-server-app-${JOB_MODE}
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        k8s-app: grpc-server-app-${JOB_MODE}
+    spec:
+      containers:
+      - image: ${SERVER_IMAGE}
+        imagePullPolicy: Always
+        name: &container1 grpc-server-ctnr-${JOB_MODE}
+        env:
+        - name: CONTAINER_NAME
+          value: *container1
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        envFrom:
+        - configMapRef:
+            name: appconfig
+        ports:
+        - protocol: TCP
+          containerPort: 50051
+        resources:
+          limits:
+            cpu: 800m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+      serviceAccountName: grpc-server-sa-${JOB_MODE}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpc-client-pod-${JOB_MODE}
+  namespace: grpc-client-ns-${JOB_MODE}
+  labels:
+    k8s-app: grpc-client-app-${JOB_MODE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: grpc-client-app-${JOB_MODE}
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        k8s-app: grpc-client-app-${JOB_MODE}
+    spec:
+      containers:
+      - image: ${CLIENT_IMAGE}
+        imagePullPolicy: Always
+        name: &container2 grpc-client-ctnr-${JOB_MODE}
+        env:
+        - name: CONTAINER_NAME
+          value: *container2
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        envFrom:
+        - configMapRef:
+            name: appconfig
+        resources:
+          limits:
+            cpu: 800m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+      serviceAccountName: grpc-client-sa-${JOB_MODE}
