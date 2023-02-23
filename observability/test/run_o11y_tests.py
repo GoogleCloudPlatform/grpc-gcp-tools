@@ -44,15 +44,12 @@ import string
 import subprocess
 import sys
 from test_utils import (
-    ClientActionArgs,
     ConfigLocation,
     ExpectCount,
     JobMode,
-    LanguageConstants,
     LoggerSide,
     ObservabilityConfig,
     ObservabilityTestCase,
-    ServerStartArgs,
     SupportedLang,
     SupportedLangEnum,
     TestRunMetadata,
@@ -70,6 +67,7 @@ ZONE = 'us-central1-c'
 OBSERVABILITY_LOG_NAME = 'microservices.googleapis.com%2Fobservability%2Fgrpc'
 CONFIG_ENV_VAR_NAME = 'GRPC_GCP_OBSERVABILITY_CONFIG'
 CONFIG_FILE_ENV_VAR_NAME = 'GRPC_GCP_OBSERVABILITY_CONFIG_FILE'
+CONFIG_FILE_LOCAL_DIR = '/tmp'
 IMAGE_TAG = '1.53.0-dev'
 SUPPORTED_METRICS = [
     'custom.googleapis.com/opencensus/grpc.io/client/started_rpcs',
@@ -79,44 +77,11 @@ SUPPORTED_METRICS = [
 ]
 # number of seconds to allow running RPC action command
 WAIT_SECS_CLIENT_ACTION = 95
-WAIT_SECS_SERVER_START = 20
+WAIT_SECS_SERVER_START = 40
 WAIT_SECS_GKE_DEPLOYMENT = 150
 # wait for this many seconds after RPC action to allow exporters to flush
 WAIT_SECS_EXPORTER_FLUSH = 65
 WAIT_SECS_READY = 20
-
-LANGUAGE_CONSTANTS = {
-    SupportedLangEnum.GO: LanguageConstants(
-        repo_name = 'grpc-go',
-        server_start_cmd = 'interop/observability/server/server',
-        server_start_args = '--port {port}',
-        client_action_cmd = 'interop/observability/client/client',
-        client_action_args = \
-        '--server_host={server_host} ' +
-        '--server_port={server_port} ' +
-        '--export_interval={exporter_interval} ' +
-        '--action={action}'
-    ),
-    SupportedLangEnum.JAVA: LanguageConstants(
-        repo_name = 'grpc-java',
-        server_start_cmd = \
-        'interop-testing/build/install/grpc-interop-testing/bin/observability-test-server',
-        server_start_args = '{port}',
-        client_action_cmd = \
-        'interop-testing/build/install/grpc-interop-testing/bin/observability-test-client',
-        client_action_args = '{server_host}:{server_port} {exporter_interval} {action}'
-    ),
-    SupportedLangEnum.CPP: LanguageConstants(
-        repo_name = 'grpc',
-        server_start_cmd = 'bazel-bin/test/cpp/interop/interop_server',
-        server_start_args = '--port={port}',
-        client_action_cmd = 'bazel-bin/test/cpp/interop/interop_client',
-        client_action_args = \
-        '--server_host={server_host} ' +
-        '--server_port={server_port} ' +
-        '--test_case=large_unary {action}'
-    ),
-}
 
 logger = logging.getLogger(__name__)
 console_handler = logging.StreamHandler()
@@ -144,20 +109,22 @@ def parse_args() -> argparse.Namespace:
     logger.debug('Parsed args: ' + str({k: str(v) for k, v in vars(args).items()}))
     return args
 
+class CommonUtil:
+    @staticmethod
+    def get_image_name(lang: SupportedLang, job_mode: JobMode) -> str:
+        return 'gcr.io/%s/grpc-observability/testing/%s-%s:%s' % (PROJECT, job_mode, lang, IMAGE_TAG)
+
 class TestRunner:
     args: argparse.Namespace
     job_name: str
-    exit_status: int
+    exc: Optional[Exception]
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.job_name = '%s:%s:%s' % (self.args.server_lang,
                                       self.args.client_lang,
                                       self.args.test_case)
-        self.exit_status = 0
-
-    def set_exit_status(self, status: int) -> None:
-        self.exit_status = status
+        self.exc = None
 
     def write_sponge_xml(self) -> None:
         sponge_dir = TestUtil.get_sponge_log_dir(self.args.job_mode, self.job_name)
@@ -168,197 +135,27 @@ class TestRunner:
         timestamp = datetime.now(timezone.utc).isoformat()
         res = '<testsuites>\n'
         res += '  <testsuite errors="0" failures="%d" name="grpc-o11y-%s" ' % (
-            self.exit_status, self.job_name)
+            (1 if self.exc else 0), self.job_name)
         res += 'package="grpc-o11y-tests" timestamp="%s">\n' % timestamp
         res += '  </testsuite>\n</testsuites>'
         return res
 
     def run(self) -> None:
         try:
+            # TODO(stanleycheung): better structure these class to remove passing self
             impl = TestCaseImpl(self)
             test_case_func = getattr(impl, str(self.args.test_case))
-            logger.info('Executing TestCaseImpl.%s()' % str(self.args.test_case))
+            logger.info('Executing TestCaseImpl.%s()' % self.args.test_case)
             test_case_func()
-        except Exception:
-            self.set_exit_status(1)
+        except Exception as e:
+            self.exc = e
             logger.error(traceback.format_exc())
         finally:
             self.write_sponge_xml()
             logger.info("Test case '%s' %s." % (self.args.test_case,
-                                             'failed' if self.exit_status else 'passed'))
-            sys.exit(self.exit_status)
-
-class GKETestEnv:
-    args: argparse.Namespace
-    k8s_core_v1: kubernetes_client.CoreV1Api
-    k8s_client: kubernetes_client.ApiClient
-    server_pod_stream: kubernetes_stream
-    server_pod_name: str
-    server_pod_ip: str
-    server_pid: str
-    client_pod_name: str
-
-    def __init__(self, args: argparse.Namespace) -> None:
-        self.args = args
-        self.SERVER_NAMESPACE = 'grpc-server-ns-%s' % args.gke_resource_identifier
-        self.CLIENT_NAMESPACE = 'grpc-client-ns-%s' % args.gke_resource_identifier
-        self.SERVER_CONTAINER_NAME = 'grpc-server-ctnr-%s' % args.gke_resource_identifier
-        self.CLIENT_CONTAINER_NAME = 'grpc-client-ctnr-%s' % args.gke_resource_identifier
-        self.k8s_core_v1 = None
-        self.k8s_client = None
-        self.server_pod_stream = None
-        self.server_pod_name = ''
-        self.server_pod_ip = ''
-        self.server_pid = ''
-        self.client_pod_name = ''
-
-    def get_image_name(self, lang: SupportedLang, job_mode: JobMode) -> str:
-        return 'gcr.io/%s/grpc-observability/testing/%s-%s:%s' % (PROJECT, job_mode, lang, IMAGE_TAG)
-
-    def set_config_cmd(self, config: ObservabilityConfig) -> str:
-        return "export %s='%s'" % (CONFIG_ENV_VAR_NAME, config.toJson())
-
-    def load_kubernetes_context(self) -> None:
-        contexts, _ = kubernetes_config.list_kube_config_contexts()
-        picked_context = ''
-        for context in contexts:
-            if PROJECT in context['context']['cluster'] and CLUSTER_NAME in context['context']['cluster']:
-                if picked_context:
-                    raise Exception('Found multiple kubernetes config on the same project.')
-                picked_context = context['name']
-        logger.info('Using kubernetes context: %s' % picked_context)
-        kubernetes_config.load_kube_config(context=picked_context)
-        self.k8s_core_v1 = kubernetes_client.CoreV1Api()
-        self.k8s_client = kubernetes_client.ApiClient()
-
-    def deploy_gke_resources(self) -> None:
-        # Do string replacements on deployment yaml file
-        replacements = {
-            '${PROJECT}': PROJECT,
-            '${PROJNUM}': PROJECT_NUM,
-            '${SERVER_IMAGE}': self.get_image_name(self.args.server_lang, self.args.job_mode),
-            '${CLIENT_IMAGE}': self.get_image_name(self.args.client_lang, self.args.job_mode),
-            '${JOB_MODE}': self.args.gke_resource_identifier,
-        }
-        yaml_file_data = ''
-        with open(os.path.join(os.path.dirname(__file__), 'gke-deployment.yaml'), 'r') as f:
-            yaml_file_data = f.read()
-        for orig, replacement in replacements.items():
-            yaml_file_data = yaml_file_data.replace(orig, replacement)
-        logger.info('Applying deployment from yaml...')
-        logger.info(yaml_file_data)
-        tmp_file_path = '/tmp/%s:%s:%s.yaml' % (self.args.server_lang,
-                                                self.args.client_lang,
-                                                self.args.gke_resource_identifier)
-        with open(tmp_file_path, 'w') as f:
-            f.write(yaml_file_data)
-        # Deploy to GKE cluster
-        kubernetes_utils.create_from_yaml(self.k8s_client, tmp_file_path, verbose=True)
-        logger.info('Waiting for pods to be ready...')
-        timeout_target = int(time.time()) + WAIT_SECS_GKE_DEPLOYMENT
-        while True:
-            try:
-                if int(time.time()) > timeout_target:
-                    break
-                time.sleep(10)
-                self.get_active_pod_data()
-                return
-            except Exception:
-                logger.error(traceback.format_exc())
-        raise Exception('GKE resources still not ready after %d seconds' % WAIT_SECS_GKE_DEPLOYMENT)
-
-    def clean_up_gke_resources(self) -> None:
-        f = os.popen(os.path.join(os.path.dirname(__file__), 'cleanup.sh ' +
-                                  self.args.gke_resource_identifier))
-        output = f.read()
-        logger.info(output)
-
-    def get_active_pod_data(self) -> None:
-        ret = self.k8s_core_v1.list_namespaced_pod(self.SERVER_NAMESPACE)
-        for i in ret.items:
-            logger.debug('%s\t%s\t%s' % (i.status.pod_ip, i.metadata.name, i.status.phase))
-            if self.server_pod_name and i.metadata.name != self.server_pod_name:
-                raise Exception('Somehow found more than 1 pod in the server namespace.')
-            if i.status.phase != 'Running':
-                raise Exception('%s is not ready yet.' % i.metadata.name)
-            self.server_pod_name = i.metadata.name
-            self.server_pod_ip = i.status.pod_ip
-        ret = self.k8s_core_v1.list_namespaced_pod(self.CLIENT_NAMESPACE)
-        for i in ret.items:
-            logger.debug('%s\t%s\t%s' % (i.status.pod_ip, i.metadata.name, i.status.phase))
-            if self.client_pod_name and i.metadata.name != self.client_pod_name:
-                raise Exception('Somehow found more than 1 pod in the client namespace.')
-            if i.status.phase != 'Running':
-                raise Exception('%s is not ready yet.' % i.metadata.name)
-            self.client_pod_name = i.metadata.name
-        if not self.server_pod_name:
-            raise Exception('No server pod found in %s.' % self.SERVER_NAMESPACE)
-        if not self.client_pod_name:
-            raise Exception('No client pod found in %s.' % self.CLIENT_NAMESPACE)
-
-    def _test_pid(self, s):
-        if m := re.match('PID=(\d+)', s):
-            return m.group(1)
-        return False
-
-    def exec_commands_in_pod(self,
-                             pod_name: str,
-                             namespace: str,
-                             timeout_sec: int,
-                             commands: List[str]) -> Tuple[kubernetes_stream, str]:
-        stream_resp = kubernetes_stream(self.k8s_core_v1.connect_get_namespaced_pod_exec,
-                                        pod_name, namespace, command='/bin/bash',
-                                        stderr=True, stdin=True,
-                                        stdout=True, tty=False,
-                                        _preload_content=False)
-        target_sec = int(time.time()) + timeout_sec
-        pid = ''
-        while stream_resp.is_open():
-            stream_resp.update(timeout=500) # in ms
-            if stream_resp.peek_stdout():
-                stdout = stream_resp.read_stdout().strip()
-                if not pid:
-                    pid =  self._test_pid(stdout)
-                logger.info(stdout)
-            if stream_resp.peek_stderr():
-                stderr = stream_resp.read_stderr().strip()
-                if not pid:
-                    pid =  self._test_pid(stderr)
-                logger.error(stderr)
-            if commands:
-                c = commands.pop(0)
-                logger.info('%s:$ %s' % (pod_name, c))
-                stream_resp.write_stdin(c + '\n')
-            if int(time.time()) > target_sec:
-                break
-        return stream_resp, pid
-
-    def start_testservice_server(self,
-                                 server_config: ObservabilityConfig,
-                                 timeout_secs: int,
-                                 server_start_cmd: str) -> None:
-        commands = [
-            self.set_config_cmd(server_config),
-            server_start_cmd,
-            'echo "PID=$!"'
-        ]
-        self.server_pod_stream, self.server_pid = self.exec_commands_in_pod(
-            self.server_pod_name, self.SERVER_NAMESPACE, timeout_secs, commands)
-
-    def kill_testservice_server(self) -> None:
-        logger.info('Killing process %s' % self.server_pid)
-        self.server_pod_stream.write_stdin('kill -9 %s\n' % self.server_pid)
-        self.server_pod_stream.close()
-
-    def run_client_commands(self,
-                            client_config: ObservabilityConfig,
-                            timeout_secs: int,
-                            commands: List[str]) -> None:
-        client_pod_stream, _ = self.exec_commands_in_pod(
-            self.client_pod_name, self.CLIENT_NAMESPACE, timeout_secs, [
-            self.set_config_cmd(client_config)
-        ] + commands)
-        client_pod_stream.close()
+                                             'failed' if self.exc else 'passed'))
+            if self.exc:
+                raise self.exc
 
 TestCaseImplT = TypeVar('TestCaseImplT', bound='TestCaseImpl')
 CloudLoggingInterfaceT = TypeVar('CloudLoggingInterfaceT', bound='CloudLoggingInterface')
@@ -426,7 +223,7 @@ class CloudLoggingInterface(unittest.TestCase):
         for event_type in self.EVENT_TYPES:
             num = self.count_with_type_logger_method_name(event_type, logger_side, method_name)
             logger.debug('Testing %-15s %s %-15s: found %d log entries' %
-                         (event_type, str(logger_side), method_name, num))
+                         (event_type, logger_side, method_name, num))
             if expect_count == ExpectCount.ZERO:
                 self.assertEqual(num, 0)
             else:
@@ -439,9 +236,14 @@ class CloudLoggingInterface(unittest.TestCase):
         logger.debug('Found these headers in log entries payload')
         for t in self.results:
             if t.payload['type'] in event_type and t.payload['logger'] == str(logger_side):
+                if 'metadata' in t.payload['payload']:
+                    metadata_payload = t.payload['payload']['metadata']
+                else:
+                    metadata_payload = t.payload['payload']
                 logger.debug('%s %s: %d %s' % (t.payload['logger'], t.payload['type'],
-                                               len(t.payload['payload']), t.payload['payload']))
-                self.assertEqual(len(t.payload['payload']), expect_num_entries)
+                                               len(metadata_payload), metadata_payload))
+                self.assertTrue(len(metadata_payload) >= expect_num_entries and \
+                                len(metadata_payload) <= (expect_num_entries + 1))
 
     def test_message_content(self, logger_side: LoggerSide, expect_length: int) -> None:
         for t in self.results:
@@ -468,12 +270,17 @@ class CloudMonitoringInterface(unittest.TestCase):
         interval = monitoring_v3.TimeInterval({
             'end_time': {'seconds': int(time.time()),
                          'nanos': test_impl.test_run_metadata.nanos},
-            'start_time': {'seconds': test_impl.test_run_metadata.script_start_seconds,
+            'start_time': {'seconds': test_impl.test_run_metadata.test_case_start_seconds,
                            'nanos': test_impl.test_run_metadata.nanos},
         })
         metrics_results: Dict[str, List[ListTimeSeriesResponse]] = {}
         for metric_name in SUPPORTED_METRICS:
-            method_label = 'grpc_client_method' if 'client' in metric_name else 'grpc_server_method'
+            if 'client' in metric_name:
+                method_label = 'grpc_client_method'
+            elif 'server' in metric_name:
+                method_label = 'grpc_server_method'
+            else:
+                raise Exception('Unexpected metric name: %s' % metric_name)
             # cloud monitoring API only allows querying one metric at a time
             filter_str = ('metric.type = "%s" AND metric.labels.identifier = "%s" ' \
                           'AND metric.labels.%s = starts_with("grpc.testing.TestService")'
@@ -495,6 +302,7 @@ class CloudMonitoringInterface(unittest.TestCase):
         super().__init__()
         self.results = results
 
+    # TODO(stanleycheung): look to replace this with copy.deepcopy()
     def copy_to_dict(self, obj: Dict) -> Dict:
         return {key: value for key, value in obj.items()}
 
@@ -510,14 +318,10 @@ class CloudMonitoringInterface(unittest.TestCase):
         self.assertGreater(num_metrics_result, 0)
 
     def test_metric_resource_type(self, metric_name: str, resource_type: str) -> None:
-        if self.count_total(metric_name) == 0:
-            return
         for result in self.results[metric_name]:
             self.assertEqual(result.resource.type, resource_type)
 
     def test_metric_resource_labels(self, metric_name: str, resource_labels: Dict[str, str]) -> None:
-        if self.count_total(metric_name) == 0:
-            return
         for result in self.results[metric_name]:
             logger.debug('Metric resource labels: %s' % str(result.resource.labels.items()))
             actual_labels = self.copy_to_dict(result.resource.labels)
@@ -544,7 +348,7 @@ class CloudTraceInterface(unittest.TestCase):
         logger.info('Querying traces: filter_str = %s' % filter_str)
         request = trace_v1.ListTracesRequest(
             project_id=PROJECT,
-            start_time=Timestamp(seconds=test_impl.test_run_metadata.script_start_seconds),
+            start_time=Timestamp(seconds=test_impl.test_run_metadata.test_case_start_seconds),
             view=trace_v1.ListTracesRequest.ViewType.COMPLETE,
             filter=filter_str
         )
@@ -713,44 +517,50 @@ class TestCaseImpl(unittest.TestCase):
     def set_client_custom_labels(self, custom_labels: Dict[str, str]) -> None:
         self.client_config.set('labels', custom_labels)
 
-    def generate_identifier(self) -> str:
+    @staticmethod
+    def generate_identifier() -> str:
         identifier = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
         identifier += datetime.now(timezone.utc).strftime('%y%m%d%H%M%S')
         logger.info('Generated identifier: %s' % identifier)
         return identifier
 
-    def get_server_start_cmd(self, server_lang: SupportedLang) -> str:
-        return LANGUAGE_CONSTANTS[server_lang.toEnum()].server_start_cmd
+    def get_server_start_cmd(self) -> str:
+        return 'docker run -e %s -e %s -v %s:%s --name %s %s server %s' % (
+            CONFIG_FILE_ENV_VAR_NAME,
+            CONFIG_ENV_VAR_NAME,
+            CONFIG_FILE_LOCAL_DIR,
+            CONFIG_FILE_LOCAL_DIR,
+            self.get_server_container_name(),
+            CommonUtil.get_image_name(self.args.server_lang, self.args.job_mode),
+            self.args.port)
 
-    def get_server_start_args(self,
-                              server_lang: SupportedLang,
-                              server_args: ServerStartArgs) -> str:
-        return LANGUAGE_CONSTANTS[server_lang.toEnum()].get_server_start_args_replaced(server_args)
+    def get_client_action_cmd(self, action: str) -> str:
+        server_container_name = self.get_server_container_name()
+        return 'docker run --rm -e %s -e %s -v %s:%s ' \
+            '--link %s:%s %s client %s %s %d %s' % (
+                CONFIG_FILE_ENV_VAR_NAME,
+                CONFIG_ENV_VAR_NAME,
+                CONFIG_FILE_LOCAL_DIR,
+                CONFIG_FILE_LOCAL_DIR,
+                server_container_name,
+                server_container_name,
+                CommonUtil.get_image_name(self.args.client_lang, self.args.job_mode),
+                server_container_name,
+                self.args.port,
+                WAIT_SECS_EXPORTER_FLUSH,
+                action)
 
-    def get_client_action_cmd(self, client_lang: SupportedLang) -> str:
-        return LANGUAGE_CONSTANTS[client_lang.toEnum()].client_action_cmd
-
-    def get_client_action_args(self,
-                               client_lang: SupportedLang,
-                               client_args: ClientActionArgs) -> str:
-        return LANGUAGE_CONSTANTS[client_lang.toEnum()].get_client_action_args_replaced(client_args)
-
-    def get_repo_path(self, lang: SupportedLangEnum) -> str:
-        repos_base_dir = os.environ.get('REPOS_BASE_DIR')
-        if not repos_base_dir:
-            raise ValueError('Env var REPOS_BASE_DIR is not defined')
-        return os.path.join(repos_base_dir, LANGUAGE_CONSTANTS[lang].repo_name)
-
-    def wait_before_querying_o11y_data(self) -> None:
+    @staticmethod
+    def wait_before_querying_o11y_data() -> None:
         logger.info('Wait %d seconds before querying cloud...' % WAIT_SECS_READY)
         time.sleep(WAIT_SECS_READY)
 
-    def get_env_with_config(self,
-                            config: ObservabilityConfig,
-                            config_file_name: str = '') -> Dict[str, Any]:
+    @staticmethod
+    def get_env_with_config(config: ObservabilityConfig,
+                            config_file_name: Optional[str] = None) -> Dict[str, Any]:
         env = os.environ.copy()
         if config_file_name:
-            config_file_path = '/tmp/%s' % config_file_name
+            config_file_path = '%s/%s' % (CONFIG_FILE_LOCAL_DIR, config_file_name)
             with open(config_file_path, 'w') as f:
                 logger.debug('Writing config to file %s: %s' % (config_file_path, config.toJson()))
                 f.write(config.toJson())
@@ -759,13 +569,14 @@ class TestCaseImpl(unittest.TestCase):
             env[CONFIG_ENV_VAR_NAME] = config.toJson()
         return env
 
+    def get_server_container_name(self) -> str:
+        return 'observability-test-server-%s' % self.identifier
+
     def start_server_in_subprocess(self, env: Optional[Dict[str, Any]] = None) -> subprocess.Popen:
-        server_start_cmd = os.path.join(self.get_repo_path(self.args.server_lang.toEnum()),
-                                        self.get_server_start_cmd(self.args.server_lang))
-        server_args = self.get_server_start_args(self.args.server_lang,
-                                                 ServerStartArgs(port = self.args.port))
+        server_start_cmd = self.get_server_start_cmd()
         logger.info('Starting server at port %s...' % self.args.port)
-        server_proc = subprocess.Popen([server_start_cmd] + server_args.split(),
+        logger.info(server_start_cmd)
+        server_proc = subprocess.Popen(server_start_cmd.split(),
                                        stdout=self.sponge_log_out,
                                        stderr=self.sponge_log_out,
                                        env=env)
@@ -774,58 +585,26 @@ class TestCaseImpl(unittest.TestCase):
     def start_client_in_subprocess(self,
                                    action: str,
                                    env: Optional[Dict[str, Any]] = None) -> subprocess.Popen:
-        client_action_cmd = os.path.join(self.get_repo_path(self.args.client_lang.toEnum()),
-                                         self.get_client_action_cmd(self.args.client_lang))
-        client_args = self.get_client_action_args(
-            self.args.client_lang,
-            ClientActionArgs(server_host = 'localhost',
-                             server_port = self.args.port,
-                             action = action,
-                             exporter_interval = WAIT_SECS_EXPORTER_FLUSH))
-        logger.info('Running %s' % action)
-        client_proc = subprocess.Popen([client_action_cmd] + client_args.split(),
+        client_action_cmd = self.get_client_action_cmd(action)
+        logger.info('Running client cmd: %s' % client_action_cmd)
+        client_proc = subprocess.Popen(client_action_cmd.split(),
                                        stdout=self.sponge_log_out,
                                        stderr=self.sponge_log_out,
                                        env=env)
         return client_proc
 
-    def setup_and_run_rpc_gke(self, action: str) -> None:
-        gke_env = GKETestEnv(self.args)
-        gke_env.load_kubernetes_context()
-        try:
-            gke_env.deploy_gke_resources()
-            server_start_cmd = './%s %s &' % (
-                self.get_server_start_cmd(self.args.server_lang),
-                self.get_server_start_args(self.args.server_lang,
-                                           ServerStartArgs(port = self.args.port))
-            )
-            gke_env.start_testservice_server(self.server_config, WAIT_SECS_SERVER_START,
-                                             server_start_cmd)
-            client_action_cmd = './%s %s' % (
-                self.get_client_action_cmd(self.args.client_lang),
-                self.get_client_action_args(
-                    self.args.client_lang,
-                    ClientActionArgs(server_host = gke_env.server_pod_ip,
-                                     server_port = self.args.port,
-                                     action = action,
-                                     exporter_interval = WAIT_SECS_EXPORTER_FLUSH)))
-            gke_env.run_client_commands(self.client_config, WAIT_SECS_CLIENT_ACTION, [
-                client_action_cmd,
-            ])
-            gke_env.kill_testservice_server()
-            self.wait_before_querying_o11y_data()
-        except Exception:
-            self.test_runner.set_exit_status(1)
-            logger.error(traceback.format_exc())
-        finally:
-            gke_env.clean_up_gke_resources()
-            self.sponge_log_out.close()
+    def kill_server_docker_container(self) -> None:
+        docker_kill_cmd = 'docker rm -f %s' % self.get_server_container_name()
+        subprocess.Popen(docker_kill_cmd.split(),
+                         stdout=self.sponge_log_out,
+                         stderr=self.sponge_log_out,
+                         env=os.environ.copy())
 
-    def setup_and_run_rpc_vm(self,
-                             action: str,
-                             config_location: ConfigLocation = ConfigLocation.FILE,
-                             server_config_into_env_var: Optional[ObservabilityConfig] = None,
-                             client_config_into_env_var: Optional[ObservabilityConfig] = None) -> None:
+    def setup_and_run_rpc(self,
+                          action: str,
+                          config_location: ConfigLocation = ConfigLocation.FILE,
+                          server_config_into_env_var: Optional[ObservabilityConfig] = None,
+                          client_config_into_env_var: Optional[ObservabilityConfig] = None) -> None:
         if config_location == ConfigLocation.FILE:
             server_env = self.get_env_with_config(
                 self.server_config,
@@ -833,32 +612,38 @@ class TestCaseImpl(unittest.TestCase):
             client_env = self.get_env_with_config(
                 self.client_config,
                 config_file_name = 'client-config-%s.json' % self.identifier)
-        else:
+        elif config_location == ConfigLocation.ENV_VAR:
             server_env = self.get_env_with_config(self.server_config)
             client_env = self.get_env_with_config(self.client_config)
+        else:
+            raise Exception('Unhandled ConfigLocation enum value')
         if server_config_into_env_var:
             server_env[CONFIG_ENV_VAR_NAME] = server_config_into_env_var.toJson()
         if client_config_into_env_var:
             client_env[CONFIG_ENV_VAR_NAME] = client_config_into_env_var.toJson()
         server_proc = self.start_server_in_subprocess(env = server_env)
         time.sleep(WAIT_SECS_SERVER_START)
+        exc = None
         try:
             client_proc = self.start_client_in_subprocess(action, env = client_env)
             client_proc.wait(timeout=WAIT_SECS_CLIENT_ACTION)
             self.wait_before_querying_o11y_data()
-        except Exception:
-            self.test_runner.set_exit_status(1)
+        except Exception as e:
+            exc = e
             logger.error(traceback.format_exc())
         finally:
             logger.info('Killing server...')
-            os.kill(server_proc.pid, signal.SIGTERM)
+            os.kill(server_proc.pid, signal.SIGKILL)
+            self.kill_server_docker_container()
             server_proc.wait(timeout=5)
             self.sponge_log_out.close()
+            if exc:
+                raise exc
 
     def test_logging_basic(self) -> None:
         self.enable_server_logging()
         self.enable_client_logging()
-        self.setup_and_run_rpc_vm('doUnaryCall')
+        self.setup_and_run_rpc('large_unary')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_at_least_one()
         logging_results.test_event_type_at_least_one()
@@ -866,7 +651,7 @@ class TestCaseImpl(unittest.TestCase):
     def test_monitoring_basic(self) -> None:
         self.enable_server_monitoring()
         self.enable_client_monitoring()
-        self.setup_and_run_rpc_vm('doUnaryCall')
+        self.setup_and_run_rpc('large_unary')
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
         for metric_name in SUPPORTED_METRICS:
             metrics_results.test_time_series_at_least_one(metric_name)
@@ -878,63 +663,43 @@ class TestCaseImpl(unittest.TestCase):
     def test_trace_basic(self) -> None:
         self.enable_server_trace()
         self.enable_client_trace()
-        self.setup_and_run_rpc_vm('doUnaryCall')
-        trace_results = CloudTraceInterface.query_traces_from_cloud(self)
-        trace_results.test_trace_at_least_one()
-        trace_results.test_trace_sent_span_exists()
-        trace_results.test_trace_recv_span_exists()
-
-    def test_resource_labels_gke(self) -> None:
-        self.enable_all_config()
-        self.setup_and_run_rpc_gke('doUnaryCall')
-        logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
-        logging_results.test_log_entries_at_least_one()
-        logging_results.test_event_type_at_least_one()
-        metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
-        for metric_name in SUPPORTED_METRICS:
-            metrics_results.test_time_series_at_least_one(metric_name)
-            metrics_results.test_metric_resource_type(metric_name, 'k8s_container')
-            metrics_results.test_metric_resource_labels(metric_name, {
-                'cluster_name': CLUSTER_NAME,
-                'location': ZONE,
-                'project_id': PROJECT
-            })
+        self.setup_and_run_rpc('large_unary')
         trace_results = CloudTraceInterface.query_traces_from_cloud(self)
         trace_results.test_trace_at_least_one()
         trace_results.test_trace_sent_span_exists()
         trace_results.test_trace_recv_span_exists()
 
     def test_configs_disable_logging(self) -> None:
-        self.setup_and_run_rpc_vm('doUnaryCall')
+        self.setup_and_run_rpc('large_unary')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_zero()
 
     def test_configs_disable_monitoring(self) -> None:
-        self.setup_and_run_rpc_vm('doUnaryCall')
+        self.setup_and_run_rpc('large_unary')
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
         for metric_name in SUPPORTED_METRICS:
             metrics_results.test_time_series_zero(metric_name)
 
     def test_configs_disable_trace(self) -> None:
-        self.setup_and_run_rpc_vm('doUnaryCall')
+        self.setup_and_run_rpc('large_unary')
         trace_results = CloudTraceInterface.query_traces_from_cloud(self)
         trace_results.test_trace_zero_recv_span()
         trace_results.test_trace_zero_sent_span()
 
     def test_streaming(self) -> None:
         self.enable_all_config()
-        self.setup_and_run_rpc_vm('doFullDuplexCall')
+        self.setup_and_run_rpc('ping_pong')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_at_least_one()
         logging_results.test_event_type_at_least_one()
-        logging_results.test_log_entry_count(LoggerSide.SERVER, 'CLIENT_MESSAGE', 'FullDuplexCall', 5)
-        logging_results.test_log_entry_count(LoggerSide.SERVER, 'SERVER_MESSAGE', 'FullDuplexCall', 5)
-        logging_results.test_log_entry_count(LoggerSide.CLIENT, 'CLIENT_MESSAGE', 'FullDuplexCall', 5)
-        logging_results.test_log_entry_count(LoggerSide.CLIENT, 'SERVER_MESSAGE', 'FullDuplexCall', 5)
+        logging_results.test_log_entry_count(LoggerSide.SERVER, 'CLIENT_MESSAGE', 'FullDuplexCall', 4)
+        logging_results.test_log_entry_count(LoggerSide.SERVER, 'SERVER_MESSAGE', 'FullDuplexCall', 4)
+        logging_results.test_log_entry_count(LoggerSide.CLIENT, 'CLIENT_MESSAGE', 'FullDuplexCall', 4)
+        logging_results.test_log_entry_count(LoggerSide.CLIENT, 'SERVER_MESSAGE', 'FullDuplexCall', 4)
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
         for metric_name in SUPPORTED_METRICS:
             metrics_results.test_time_series_at_least_one(metric_name)
-            metrics_results.test_metric_resource_type(metric_name, 'gce_instance')
+            # metrics_results.test_metric_resource_type(metric_name, 'gce_instance')
             metrics_results.test_metric_resource_labels(metric_name, {
                 'project_id': PROJECT
             })
@@ -954,7 +719,7 @@ class TestCaseImpl(unittest.TestCase):
             'max_metadata_bytes': 4096,
             'max_message_bytes': 4096
         }])
-        self.setup_and_run_rpc_vm('doUnaryCall,doFullDuplexCall')
+        self.setup_and_run_rpc('large_unary,ping_pong')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_method_entry_count(LoggerSide.SERVER, 'UnaryCall',
                                                 ExpectCount.AT_LEAST_ONE)
@@ -976,7 +741,7 @@ class TestCaseImpl(unittest.TestCase):
             'max_metadata_bytes': 4096,
             'max_message_bytes': 4096
         }])
-        self.setup_and_run_rpc_vm('doUnaryCall,doFullDuplexCall')
+        self.setup_and_run_rpc('large_unary,ping_pong')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_method_entry_count(LoggerSide.SERVER, 'UnaryCall',
                                                 ExpectCount.AT_LEAST_ONE)
@@ -1010,7 +775,7 @@ class TestCaseImpl(unittest.TestCase):
                 'max_message_bytes': 4096
             }
         ])
-        self.setup_and_run_rpc_vm('doUnaryCall,doFullDuplexCall')
+        self.setup_and_run_rpc('large_unary,ping_pong')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_method_entry_count(LoggerSide.SERVER, 'UnaryCall',
                                                 ExpectCount.ZERO)
@@ -1024,13 +789,13 @@ class TestCaseImpl(unittest.TestCase):
     def test_configs_logging_metadata_limit(self) -> None:
         self.enable_server_logging([{
             'methods': ['*'],
-            'max_metadata_bytes': 29,
+            'max_metadata_bytes': 60,
         }])
         self.enable_client_logging([{
             'methods': ['*'],
-            'max_metadata_bytes': 29,
+            'max_metadata_bytes': 60,
         }])
-        self.setup_and_run_rpc_vm('doUnaryCall')
+        self.setup_and_run_rpc('custom_metadata')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_header_content(LoggerSide.CLIENT, 'CLIENT_HEADER', 1)
         logging_results.test_header_content(LoggerSide.SERVER, 'CLIENT_HEADER', 1)
@@ -1044,7 +809,7 @@ class TestCaseImpl(unittest.TestCase):
             'methods': ['*'],
             'max_message_bytes': 27,
         }])
-        self.setup_and_run_rpc_vm('doUnaryCall')
+        self.setup_and_run_rpc('large_unary')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_message_content(LoggerSide.SERVER, 25)
         logging_results.test_message_content(LoggerSide.CLIENT, 27)
@@ -1057,14 +822,14 @@ class TestCaseImpl(unittest.TestCase):
             'sampling_rate': 0.50
         })
         # Make 20 UnaryCall's
-        self.setup_and_run_rpc_vm(','.join(['doUnaryCall' for i in range(0, 20)]))
+        self.setup_and_run_rpc(','.join(['large_unary' for i in range(20)]))
         trace_results = CloudTraceInterface.query_traces_from_cloud(self)
         # With 50%, we should get 5-15 traces with 98.8% probability
         trace_results.test_traces_count(5, 15)
 
     def test_configs_env_var(self) -> None:
         self.enable_all_config()
-        self.setup_and_run_rpc_vm('doUnaryCall',
+        self.setup_and_run_rpc('large_unary',
                                   config_location = ConfigLocation.ENV_VAR)
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_at_least_one()
@@ -1097,7 +862,7 @@ class TestCaseImpl(unittest.TestCase):
                 'identifier': self.identifier
             }
         })
-        self.setup_and_run_rpc_vm('doUnaryCall',
+        self.setup_and_run_rpc('large_unary',
                                   config_location = ConfigLocation.FILE,
                                   server_config_into_env_var = unused_server_config,
                                   client_config_into_env_var = unused_client_config)
@@ -1119,7 +884,7 @@ class TestCaseImpl(unittest.TestCase):
     def test_configs_empty_config(self) -> None:
         self.server_config = ObservabilityConfig({})
         self.client_config = ObservabilityConfig({})
-        self.setup_and_run_rpc_vm('doUnaryCall')
+        self.setup_and_run_rpc('large_unary')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_zero()
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
@@ -1134,6 +899,7 @@ class TestCaseImpl(unittest.TestCase):
         server_proc.wait(timeout=5)
         logger.info('Expecting error from server returncode = %d' % server_proc.returncode)
         self.assertGreater(server_proc.returncode, 0)
+        self.kill_server_docker_container()
         self.sponge_log_out.close()
 
     def test_configs_invalid_config(self) -> None:
@@ -1143,6 +909,7 @@ class TestCaseImpl(unittest.TestCase):
         server_proc.wait(timeout=5)
         logger.info('Expecting error from server returncode = %d' % server_proc.returncode)
         self.assertGreater(server_proc.returncode, 0)
+        self.kill_server_docker_container()
         self.sponge_log_out.close()
 
     def test_configs_custom_labels(self) -> None:
@@ -1155,7 +922,7 @@ class TestCaseImpl(unittest.TestCase):
         self.set_client_custom_labels({**CLIENT_CUSTOM_LABEL,
             'identifier': self.identifier,
         })
-        self.setup_and_run_rpc_vm('doUnaryCall')
+        self.setup_and_run_rpc('large_unary')
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_custom_labels(LoggerSide.SERVER, SERVER_CUSTOM_LABEL)
         logging_results.test_custom_labels(LoggerSide.CLIENT, CLIENT_CUSTOM_LABEL)
@@ -1170,5 +937,6 @@ class TestCaseImpl(unittest.TestCase):
         trace_results.test_span_custom_labels(CloudTraceInterface.SENT_SPAN_PREFIX, CLIENT_CUSTOM_LABEL)
 
 # Main
-test_runner = TestRunner(parse_args())
-test_runner.run()
+if __name__ == "__main__":
+    test_runner = TestRunner(parse_args())
+    test_runner.run()

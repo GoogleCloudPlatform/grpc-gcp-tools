@@ -15,6 +15,7 @@
 """gRPC Observability Integration Tests Manager"""
 
 import argparse
+import collections
 import logging
 import os
 import random
@@ -34,7 +35,11 @@ from typing import Dict, List
 
 INTEROP_COMBINATIONS = [
     { 'server_lang': SupportedLangEnum.JAVA, 'client_lang': SupportedLangEnum.GO   },
+    { 'server_lang': SupportedLangEnum.JAVA, 'client_lang': SupportedLangEnum.CPP  },
     { 'server_lang': SupportedLangEnum.GO,   'client_lang': SupportedLangEnum.JAVA },
+    { 'server_lang': SupportedLangEnum.GO,   'client_lang': SupportedLangEnum.CPP  },
+    { 'server_lang': SupportedLangEnum.CPP,  'client_lang': SupportedLangEnum.GO   },
+    { 'server_lang': SupportedLangEnum.CPP,  'client_lang': SupportedLangEnum.JAVA },
 ]
 
 INTEROP_TEST_CASES = [
@@ -83,27 +88,6 @@ class TestJob:
         self.job_name = job_name
         self.port = port
 
-class _BaseKey:
-    key: str
-
-    def __init__(self, key: str) -> None:
-        self.key = key
-
-    def __hash__(self) -> int:
-        return hash(str(self))
-
-    def __eq__(self, other) -> bool:
-        return self.key == other.key
-
-    def __str__(self) -> str:
-        return self.key
-
-class QueueKey(_BaseKey):
-    pass
-
-class InteropEntryKey(_BaseKey):
-    pass
-
 class JobQueue:
     jobs: List[TestJob]
     server_lang: SupportedLang
@@ -132,9 +116,11 @@ class TestRunner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.exit_status = 0
+        self.lock = threading.Lock()
 
     def set_exit_status(self, status: int) -> None:
-        self.exit_status = status
+        with self.lock:
+            self.exit_status = status
 
     def run_tests(self) -> None:
         test_manager = TestManager(self)
@@ -144,16 +130,17 @@ class TestRunner:
             self.set_exit_status(1)
             logger.error(traceback.format_exc())
         finally:
-            logger.info("Observability test job for '%s' %s." % (
-                self.args.language, 'failed' if self.exit_status else 'passed'))
-            sys.exit(self.exit_status)
+            with self.lock:
+                logger.info("Observability test job for '%s' %s." % (
+                    self.args.language, 'failed' if self.exit_status else 'passed'))
+                sys.exit(self.exit_status)
 
 class TestManager:
     args: argparse.Namespace
     test_runner: TestRunner
-    job_queues: Dict[QueueKey, JobQueue]
+    job_queues: Dict[str, JobQueue]
     curr_port_num: int
-    curr_interop_shard_nums: Dict[InteropEntryKey, int]
+    curr_interop_shard_nums: Dict[str, int]
     curr_lang_shard_nums: Dict[SupportedLang, int]
 
     def __init__(self, test_runner: TestRunner) -> None:
@@ -161,8 +148,8 @@ class TestManager:
         self.test_runner = test_runner
         self.job_queues = {}
         self.curr_port_num = 14285
-        self.curr_interop_shard_nums = {}
-        self.curr_lang_shard_nums = {}
+        self.curr_interop_shard_nums = collections.defaultdict(int)
+        self.curr_lang_shard_nums = collections.defaultdict(int)
         if self.args.language.toEnum() == SupportedLangEnum.INTEROP:
             self.initialize_interop()
             self.add_interop_jobs()
@@ -171,10 +158,9 @@ class TestManager:
             self.add_lang_jobs(self.args.language)
 
     def initialize_single_lang(self, lang: SupportedLang) -> None:
-        self.curr_lang_shard_nums[lang] = 0
         logger.info('Initializing %d job queues for %s' % (NUM_LANG_QUEUES, lang))
-        for i in range(0, NUM_LANG_QUEUES):
-            queue_key = QueueKey('%s:%d' % (lang, i))
+        for i in range(NUM_LANG_QUEUES):
+            queue_key = '%s:%d' % (lang, i)
             self.job_queues[queue_key] = JobQueue(
                 server_lang = lang,
                 client_lang = lang,
@@ -185,10 +171,9 @@ class TestManager:
     def initialize_interop(self) -> None:
         logger.info('Initializing %d job queues for each interop combinations' % NUM_INTEROP_QUEUES)
         for entry in INTEROP_COMBINATIONS:
-            entry_key = InteropEntryKey('%s:%s' % (entry['server_lang'], entry['client_lang']))
-            self.curr_interop_shard_nums[entry_key] = 0
-            for i in range(0, NUM_INTEROP_QUEUES):
-                queue_key = QueueKey('%s:%d' % (entry_key, i))
+            entry_key = '%s:%s' % (entry['server_lang'], entry['client_lang'])
+            for i in range(NUM_INTEROP_QUEUES):
+                queue_key = '%s:%d' % (entry_key, i)
                 self.job_queues[queue_key] = JobQueue(
                     server_lang = SupportedLang(entry['server_lang']),
                     client_lang = SupportedLang(entry['client_lang']),
@@ -201,7 +186,7 @@ class TestManager:
                           ''.join(random.choices(string.ascii_lowercase + string.digits, k=6)))
 
     def add_job_to_job_queue(self,
-                             queue_key: QueueKey,
+                             queue_key: str,
                              server_lang: SupportedLang,
                              client_lang: SupportedLang,
                              test_case: ObservabilityTestCase) -> None:
@@ -214,7 +199,7 @@ class TestManager:
         ))
         self.curr_port_num += 1
 
-    def get_next_interop_shard_num(self, entry_key: InteropEntryKey) -> int:
+    def get_next_interop_shard_num(self, entry_key: str) -> int:
         num = self.curr_interop_shard_nums[entry_key]
         self.curr_interop_shard_nums[entry_key] = (num + 1) % NUM_INTEROP_QUEUES
         return num
@@ -226,9 +211,9 @@ class TestManager:
 
     def add_interop_jobs(self) -> None:
         for entry in INTEROP_COMBINATIONS:
-            entry_key = InteropEntryKey('%s:%s' % (entry['server_lang'], entry['client_lang']))
+            entry_key = '%s:%s' % (entry['server_lang'], entry['client_lang'])
             for test_case in INTEROP_TEST_CASES:
-                queue_key = QueueKey('%s:%d' % (entry_key, self.get_next_interop_shard_num(entry_key)))
+                queue_key = '%s:%d' % (entry_key, self.get_next_interop_shard_num(entry_key))
                 self.add_job_to_job_queue(queue_key,
                                           SupportedLang(entry['server_lang']),
                                           SupportedLang(entry['client_lang']),
@@ -236,12 +221,12 @@ class TestManager:
 
     def add_lang_jobs(self, lang: SupportedLang) -> None:
         for test_case in ObservabilityTestCase:
-            queue_key = QueueKey('%s:%d' % (lang, self.get_next_lang_shard_num(lang)))
+            queue_key = '%s:%d' % (lang, self.get_next_lang_shard_num(lang))
             self.add_job_to_job_queue(queue_key, lang, lang, test_case)
 
     def start_process_in_background(self,
                                     job: TestJob,
-                                    queue_key: QueueKey,
+                                    queue_key: str,
                                     extra_args: List[str] = []) -> subprocess.Popen:
         sponge_log_dir = TestUtil.get_sponge_log_dir(self.args.job_mode, job.job_name)
         # Note: the corresponding sponge_log.xml is being written in run_o11y_tests.py itself
@@ -250,7 +235,7 @@ class TestManager:
             env = os.environ.copy()
             env['GRPC_VERBOSITY'] = 'DEBUG'
             return subprocess.Popen(
-                [os.path.join(os.path.dirname(__file__), 'run_o11y_tests.py'),
+                [sys.executable, os.path.join(os.path.dirname(__file__), 'run_o11y_tests.py'),
                  '--server_lang', str(job.server_lang),
                  '--client_lang', str(job.client_lang),
                  '--job_mode', str(self.args.job_mode),
@@ -259,20 +244,18 @@ class TestManager:
                 stderr=out,
                 env=env)
 
-    def start_all_job_queues(self) -> Dict[QueueKey, threading.Thread]:
-        threads: Dict[QueueKey, threading.Thread] = {}
-        max_job_queue_size = 0
+    def start_all_job_queues(self) -> Dict[str, threading.Thread]:
+        threads: Dict[str, threading.Thread] = {}
+        max_job_queue_size = max(len(q.jobs) for q in self.job_queues.values())
         for queue_key, job_queue in self.job_queues.items():
-            thd = threading.Thread(target=self.run_job_queue, args=(queue_key,))
+            # TODO(stanleycheung): consider using daemon thread
+            thd = threading.Thread(target=self.run_job_queue, args=(queue_key,job_queue,))
             threads[queue_key] = thd
             thd.start()
-            if len(job_queue.jobs) > max_job_queue_size:
-                max_job_queue_size = len(job_queue.jobs)
         logger.info('Max job queue size: %d' % max_job_queue_size)
         return threads
 
-    def run_job_queue(self, queue_key: QueueKey) -> None:
-        job_queue = self.job_queues[queue_key]
+    def run_job_queue(self, queue_key: str, job_queue: JobQueue) -> None:
         for job in job_queue.jobs:
             try:
                 proc = self.start_process_in_background(
@@ -302,5 +285,6 @@ class TestManager:
             logger.info('Queue %s is done' % queue_key)
 
 # Main
-test_runner = TestRunner(parse_args())
-test_runner.run_tests()
+if __name__ == "__main__":
+    test_runner = TestRunner(parse_args())
+    test_runner.run_tests()

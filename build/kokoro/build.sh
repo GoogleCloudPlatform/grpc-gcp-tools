@@ -29,6 +29,7 @@ cd "$(dirname "$0")"
 PROJECT=microsvcs-testing
 CLUSTER=grpc-o11y-integration-testing-cluster
 ZONE=us-central1-c
+# TODO(stanleycheung): remove the need for this constant
 RELEASE=1.53.0-dev
 TEST_DIR=`realpath ../../observability/test`
 
@@ -59,10 +60,11 @@ sudo apt-get -qq install -y \
 
 # Install Python packages
 python3 --version
-python3 -m pip install -r requirements.txt
+python3 -m pip install -r requirements.lock
 
 # Install Go
 curl -sSL https://go.dev/dl/go1.17.13.linux-amd64.tar.gz -o /tmp/go1.17.13.linux-amd64.tar.gz
+echo '0b5858bc0f90dd17536df3a4d7635cc576b2c507 /tmp/go1.17.13.linux-amd64.tar.gz' | sha1sum -c -
 sudo tar -C /usr/local -xzf /tmp/go1.17.13.linux-amd64.tar.gz
 export PATH=${PATH}:/usr/local/go/bin
 
@@ -85,72 +87,61 @@ export REPOS_BASE_DIR=${KOKORO_ARTIFACTS_DIR}/github
 build_java () {
   mkdir -p ${REPOS_BASE_DIR}/grpc-java
   git clone https://github.com/stanley-cheung/grpc-java ${REPOS_BASE_DIR}/grpc-java
+  LANG='java'
+  docker_image_tag
   (cd ${REPOS_BASE_DIR}/grpc-java && \
     git checkout o11y-testing-${JOB_MODE} && \
     git log -1 --oneline && \
-    ./gradlew installDist -x test -PskipCodegen=true -PskipAndroid=true)
+    ./buildscripts/observability-test/build_docker.sh && \
+    docker push -q ${TAG_NAME})
 }
 
 build_go () {
   mkdir -p ${REPOS_BASE_DIR}/grpc-go
   git clone https://github.com/stanley-cheung/grpc-go ${REPOS_BASE_DIR}/grpc-go
+  LANG='go'
+  docker_image_tag
   (cd ${REPOS_BASE_DIR}/grpc-go && \
     git checkout o11y-testing-${JOB_MODE} && \
     git log -1 --oneline && \
-    go build -o interop/observability/server/ interop/observability/server/server.go && \
-    go build -o interop/observability/client/ interop/observability/client/client.go)
+    ./interop/observability/build_docker.sh && \
+    docker push -q ${TAG_NAME})
 }
 
 build_cpp () {
   mkdir -p ${REPOS_BASE_DIR}/grpc
   git clone https://github.com/stanley-cheung/grpc ${REPOS_BASE_DIR}/grpc
+  LANG='cpp'
+  docker_image_tag
   (cd ${REPOS_BASE_DIR}/grpc && \
     git checkout o11y-testing-${JOB_MODE} && \
     git log -1 --oneline && \
-    git submodule update --init && \
-    ./tools/bazel build test/cpp/interop:interop_test)
+    ./tools/dockerfile/observability-test/cpp/build_docker.sh && \
+    docker push -q ${TAG_NAME})
 }
 
 docker_image_tag () {
-  export TAG_NAME=gcr.io/${PROJECT}/grpc-observability/testing/${JOB_MODE}-${LANGUAGE}:${RELEASE}
-}
-
-docker_java () {
-  docker_image_tag
-  (cd ${REPOS_BASE_DIR}/grpc-java && \
-    ./buildscripts/observability-test/build_docker.sh && \
-    docker push -q ${TAG_NAME})
-}
-
-docker_go () {
-  docker_image_tag
-  (cd ${REPOS_BASE_DIR}/grpc-go && \
-    ./interop/observability/build_docker.sh && \
-    docker push -q ${TAG_NAME})
-}
-
-docker_cpp () {
-  docker_image_tag
-  (cd ${REPOS_BASE_DIR}/grpc)
+  # TODO(stanleycheung): need a unique identifier in the docker image / tag name
+  #                      to make sure tests are running against this specific build
+  export TAG_NAME=gcr.io/${PROJECT}/grpc-observability/testing/${JOB_MODE}-${LANG}:${RELEASE}
 }
 
 if [ "${LANGUAGE}" = 'java' ] ; then
   build_java
-  docker_java
 
 elif [ "${LANGUAGE}" = 'go' ] ; then
   build_go
-  docker_go
 
 elif [ "${LANGUAGE}" = 'cpp' ] ; then
   build_cpp
-  docker_cpp
 
 elif [ "${LANGUAGE}" = 'interop' ] ; then
   build_go
   build_java
+  build_cpp
 fi
 
+docker ps -a
 
 
 ##
@@ -161,3 +152,5 @@ fi
 
 # Run observability test job
 ${TEST_DIR}/o11y_tests_manager.py --job_mode ${JOB_MODE} --language ${LANGUAGE}
+
+docker ps -a

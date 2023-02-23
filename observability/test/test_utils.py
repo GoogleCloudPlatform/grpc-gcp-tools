@@ -24,7 +24,6 @@ class ObservabilityTestCase(str, Enum):
     TEST_LOGGING_BASIC = 'test_logging_basic'
     TEST_MONITORING_BASIC = 'test_monitoring_basic'
     TEST_TRACE_BASIC = 'test_trace_basic'
-    TEST_RESOURCE_LABELS_GKE = 'test_resource_labels_gke'
     TEST_CONFIGS_DISABLE_LOGGING = 'test_configs_disable_logging'
     TEST_CONFIGS_DISABLE_MONITORING = 'test_configs_disable_monitoring'
     TEST_CONFIGS_DISABLE_TRACE = 'test_configs_disable_trace'
@@ -89,14 +88,14 @@ class ObservabilityConfig:
         return json.dumps(self.config)
 
 class TestRunMetadata:
-    script_start_time: float
-    script_start_seconds: int
+    test_case_start_time: float
+    test_case_start_seconds: int
     nanos: int
 
     def __init__(self) -> None:
-        self.script_start_time = time.time()
-        self.script_start_seconds = int(self.script_start_time)
-        self.nanos = int((self.script_start_time - self.script_start_seconds) * 10**9)
+        self.test_case_start_time = time.time()
+        self.test_case_start_seconds = int(self.test_case_start_time)
+        self.nanos = int((self.test_case_start_time - self.test_case_start_seconds) * 10**9)
 
 class LoggerSide(str, Enum):
     SERVER = 1
@@ -113,65 +112,12 @@ class ConfigLocation(Enum):
     FILE = 1
     ENV_VAR = 2
 
-class ServerStartArgs:
-    port: str
-
-    def __init__(self,
-                 port: str) -> None:
-        self.port = port
-
-class ClientActionArgs:
-    server_host: str
-    server_port: str
-    exporter_interval: int
-    action: str
-
-    def __init__(self,
-                 server_host: str,
-                 server_port: str,
-                 exporter_interval: int,
-                 action: str) -> None:
-        self.server_host = server_host
-        self.server_port = server_port
-        self.exporter_interval = exporter_interval
-        self.action = action
-
-class LanguageConstants:
-    repo_name: str
-    server_start_cmd: str
-    server_start_args: str
-    client_action_cmd: str
-    client_action_args: str
-
-    def __init__(self,
-                 repo_name: str,
-                 server_start_cmd: str,
-                 server_start_args: str,
-                 client_action_cmd: str,
-                 client_action_args: str) -> None:
-        self.repo_name = repo_name
-        self.server_start_cmd = server_start_cmd
-        self.server_start_args = server_start_args
-        self.client_action_cmd = client_action_cmd
-        self.client_action_args = client_action_args
-
-    def get_server_start_args_replaced(self, args: ServerStartArgs) -> str:
-        return self.server_start_args.format(
-            port = args.port)
-
-    def get_client_action_args_replaced(self, args: ClientActionArgs) -> str:
-        return self.client_action_args.format(
-            server_host = args.server_host,
-            server_port = args.server_port,
-            exporter_interval = args.exporter_interval,
-            action = args.action)
-
 class TestUtil:
     @staticmethod
     def get_sponge_log_dir(job_mode: JobMode, job_name: str) -> str:
         artifacts_dir = os.environ.get('KOKORO_ARTIFACTS_DIR')
         if not artifacts_dir:
             raise ValueError('Env var KOKORO_ARTIFACTS_DIR is not defined')
-        sponge_log_dir = os.path.join(artifacts_dir, str(job_mode), job_name)
+        sponge_log_dir = os.path.join(artifacts_dir, job_mode, job_name)
         os.makedirs(sponge_log_dir, exist_ok = True)
         return sponge_log_dir

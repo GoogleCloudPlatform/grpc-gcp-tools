@@ -1,3 +1,0 @@
-py_compile.sh
-rm_pycache.sh
-observability/test/dummy.py
