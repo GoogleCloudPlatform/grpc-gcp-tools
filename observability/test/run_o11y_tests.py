@@ -79,8 +79,6 @@ SUPPORTED_METRICS = [
 WAIT_SECS_CLIENT_ACTION = 95
 WAIT_SECS_SERVER_START = 40
 WAIT_SECS_GKE_DEPLOYMENT = 150
-# wait for this many seconds after RPC action to allow exporters to flush
-WAIT_SECS_EXPORTER_FLUSH = 65
 WAIT_SECS_READY = 20
 
 logger = logging.getLogger(__name__)
@@ -537,7 +535,7 @@ class TestCaseImpl(unittest.TestCase):
     def get_client_action_cmd(self, action: str) -> str:
         server_container_name = self.get_server_container_name()
         return 'docker run --rm -e %s -e %s -v %s:%s ' \
-            '--link %s:%s %s client %s %s %d %s' % (
+            '--link %s:%s %s client %s %s %s' % (
                 CONFIG_FILE_ENV_VAR_NAME,
                 CONFIG_ENV_VAR_NAME,
                 CONFIG_FILE_LOCAL_DIR,
@@ -545,9 +543,9 @@ class TestCaseImpl(unittest.TestCase):
                 server_container_name,
                 server_container_name,
                 CommonUtil.get_image_name(self.args.client_lang, self.args.job_mode),
+                # the order of the following parameters needs to match each lang's run.sh script
                 server_container_name,
                 self.args.port,
-                WAIT_SECS_EXPORTER_FLUSH,
                 action)
 
     @staticmethod
