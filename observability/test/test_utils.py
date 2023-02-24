@@ -18,7 +18,7 @@ from enum import Enum
 import json
 import os
 import time
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 class ObservabilityTestCase(str, Enum):
     TEST_LOGGING_BASIC = 'test_logging_basic'
@@ -96,6 +96,14 @@ class TestRunMetadata:
         self.test_case_start_time = time.time()
         self.test_case_start_seconds = int(self.test_case_start_time)
         self.nanos = int((self.test_case_start_time - self.test_case_start_seconds) * 10**9)
+
+class InteropAction:
+    test_case: str
+    num_times: int
+
+    def __init__(self, test_case: str, num_times: int = 1) -> None:
+        self.test_case = test_case
+        self.num_times = num_times
 
 class LoggerSide(str, Enum):
     SERVER = 1

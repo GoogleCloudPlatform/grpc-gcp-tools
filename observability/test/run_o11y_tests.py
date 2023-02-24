@@ -46,6 +46,7 @@ import sys
 from test_utils import (
     ConfigLocation,
     ExpectCount,
+    InteropAction,
     JobMode,
     LoggerSide,
     ObservabilityConfig,
@@ -532,10 +533,10 @@ class TestCaseImpl(unittest.TestCase):
             CommonUtil.get_image_name(self.args.server_lang, self.args.job_mode),
             self.args.port)
 
-    def get_client_action_cmd(self, action: str) -> str:
+    def get_client_action_cmd(self, action: InteropAction) -> str:
         server_container_name = self.get_server_container_name()
         return 'docker run --rm -e %s -e %s -v %s:%s ' \
-            '--link %s:%s %s client %s %s %s' % (
+            '--link %s:%s %s client %s %s %s %d' % (
                 CONFIG_FILE_ENV_VAR_NAME,
                 CONFIG_ENV_VAR_NAME,
                 CONFIG_FILE_LOCAL_DIR,
@@ -546,7 +547,8 @@ class TestCaseImpl(unittest.TestCase):
                 # the order of the following parameters needs to match each lang's run.sh script
                 server_container_name,
                 self.args.port,
-                action)
+                action.test_case,
+                action.num_times)
 
     @staticmethod
     def wait_before_querying_o11y_data() -> None:
@@ -581,7 +583,7 @@ class TestCaseImpl(unittest.TestCase):
         return server_proc
 
     def start_client_in_subprocess(self,
-                                   action: str,
+                                   action: InteropAction,
                                    env: Optional[Dict[str, Any]] = None) -> subprocess.Popen:
         client_action_cmd = self.get_client_action_cmd(action)
         logger.info('Running client cmd: %s' % client_action_cmd)
@@ -599,7 +601,7 @@ class TestCaseImpl(unittest.TestCase):
                          env=os.environ.copy())
 
     def setup_and_run_rpc(self,
-                          action: str,
+                          actions: List[InteropAction],
                           config_location: ConfigLocation = ConfigLocation.FILE,
                           server_config_into_env_var: Optional[ObservabilityConfig] = None,
                           client_config_into_env_var: Optional[ObservabilityConfig] = None) -> None:
@@ -623,8 +625,11 @@ class TestCaseImpl(unittest.TestCase):
         time.sleep(WAIT_SECS_SERVER_START)
         exc = None
         try:
-            client_proc = self.start_client_in_subprocess(action, env = client_env)
-            client_proc.wait(timeout=WAIT_SECS_CLIENT_ACTION)
+            client_procs = []
+            for action in actions:
+                client_procs.append(self.start_client_in_subprocess(action, env = client_env))
+            for client_proc in client_procs:
+                client_proc.wait(timeout=WAIT_SECS_CLIENT_ACTION)
             self.wait_before_querying_o11y_data()
         except Exception as e:
             exc = e
@@ -641,7 +646,7 @@ class TestCaseImpl(unittest.TestCase):
     def test_logging_basic(self) -> None:
         self.enable_server_logging()
         self.enable_client_logging()
-        self.setup_and_run_rpc('large_unary')
+        self.setup_and_run_rpc([InteropAction('large_unary')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_at_least_one()
         logging_results.test_event_type_at_least_one()
@@ -649,7 +654,7 @@ class TestCaseImpl(unittest.TestCase):
     def test_monitoring_basic(self) -> None:
         self.enable_server_monitoring()
         self.enable_client_monitoring()
-        self.setup_and_run_rpc('large_unary')
+        self.setup_and_run_rpc([InteropAction('large_unary')])
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
         for metric_name in SUPPORTED_METRICS:
             metrics_results.test_time_series_at_least_one(metric_name)
@@ -661,32 +666,32 @@ class TestCaseImpl(unittest.TestCase):
     def test_trace_basic(self) -> None:
         self.enable_server_trace()
         self.enable_client_trace()
-        self.setup_and_run_rpc('large_unary')
+        self.setup_and_run_rpc([InteropAction('large_unary')])
         trace_results = CloudTraceInterface.query_traces_from_cloud(self)
         trace_results.test_trace_at_least_one()
         trace_results.test_trace_sent_span_exists()
         trace_results.test_trace_recv_span_exists()
 
     def test_configs_disable_logging(self) -> None:
-        self.setup_and_run_rpc('large_unary')
+        self.setup_and_run_rpc([InteropAction('large_unary')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_zero()
 
     def test_configs_disable_monitoring(self) -> None:
-        self.setup_and_run_rpc('large_unary')
+        self.setup_and_run_rpc([InteropAction('large_unary')])
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
         for metric_name in SUPPORTED_METRICS:
             metrics_results.test_time_series_zero(metric_name)
 
     def test_configs_disable_trace(self) -> None:
-        self.setup_and_run_rpc('large_unary')
+        self.setup_and_run_rpc([InteropAction('large_unary')])
         trace_results = CloudTraceInterface.query_traces_from_cloud(self)
         trace_results.test_trace_zero_recv_span()
         trace_results.test_trace_zero_sent_span()
 
     def test_streaming(self) -> None:
         self.enable_all_config()
-        self.setup_and_run_rpc('ping_pong')
+        self.setup_and_run_rpc([InteropAction('ping_pong')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_at_least_one()
         logging_results.test_event_type_at_least_one()
@@ -717,7 +722,8 @@ class TestCaseImpl(unittest.TestCase):
             'max_metadata_bytes': 4096,
             'max_message_bytes': 4096
         }])
-        self.setup_and_run_rpc('large_unary,ping_pong')
+        self.setup_and_run_rpc([InteropAction('large_unary'),
+                                InteropAction('ping_pong')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_method_entry_count(LoggerSide.SERVER, 'UnaryCall',
                                                 ExpectCount.AT_LEAST_ONE)
@@ -739,7 +745,8 @@ class TestCaseImpl(unittest.TestCase):
             'max_metadata_bytes': 4096,
             'max_message_bytes': 4096
         }])
-        self.setup_and_run_rpc('large_unary,ping_pong')
+        self.setup_and_run_rpc([InteropAction('large_unary'),
+                                InteropAction('ping_pong')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_method_entry_count(LoggerSide.SERVER, 'UnaryCall',
                                                 ExpectCount.AT_LEAST_ONE)
@@ -773,7 +780,8 @@ class TestCaseImpl(unittest.TestCase):
                 'max_message_bytes': 4096
             }
         ])
-        self.setup_and_run_rpc('large_unary,ping_pong')
+        self.setup_and_run_rpc([InteropAction('large_unary'),
+                                InteropAction('ping_pong')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_method_entry_count(LoggerSide.SERVER, 'UnaryCall',
                                                 ExpectCount.ZERO)
@@ -793,7 +801,7 @@ class TestCaseImpl(unittest.TestCase):
             'methods': ['*'],
             'max_metadata_bytes': 60,
         }])
-        self.setup_and_run_rpc('custom_metadata')
+        self.setup_and_run_rpc([InteropAction('custom_metadata')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_header_content(LoggerSide.CLIENT, 'CLIENT_HEADER', 1)
         logging_results.test_header_content(LoggerSide.SERVER, 'CLIENT_HEADER', 1)
@@ -807,7 +815,7 @@ class TestCaseImpl(unittest.TestCase):
             'methods': ['*'],
             'max_message_bytes': 27,
         }])
-        self.setup_and_run_rpc('large_unary')
+        self.setup_and_run_rpc([InteropAction('large_unary')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_message_content(LoggerSide.SERVER, 25)
         logging_results.test_message_content(LoggerSide.CLIENT, 27)
@@ -820,15 +828,15 @@ class TestCaseImpl(unittest.TestCase):
             'sampling_rate': 0.50
         })
         # Make 20 UnaryCall's
-        self.setup_and_run_rpc(','.join(['large_unary' for i in range(20)]))
+        self.setup_and_run_rpc([InteropAction('large_unary', num_times = 20)])
         trace_results = CloudTraceInterface.query_traces_from_cloud(self)
         # With 50%, we should get 5-15 traces with 98.8% probability
         trace_results.test_traces_count(5, 15)
 
     def test_configs_env_var(self) -> None:
         self.enable_all_config()
-        self.setup_and_run_rpc('large_unary',
-                                  config_location = ConfigLocation.ENV_VAR)
+        self.setup_and_run_rpc([InteropAction('large_unary')],
+                               config_location = ConfigLocation.ENV_VAR)
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_at_least_one()
         logging_results.test_event_type_at_least_one()
@@ -860,10 +868,10 @@ class TestCaseImpl(unittest.TestCase):
                 'identifier': self.identifier
             }
         })
-        self.setup_and_run_rpc('large_unary',
-                                  config_location = ConfigLocation.FILE,
-                                  server_config_into_env_var = unused_server_config,
-                                  client_config_into_env_var = unused_client_config)
+        self.setup_and_run_rpc([InteropAction('large_unary')],
+                               config_location = ConfigLocation.FILE,
+                               server_config_into_env_var = unused_server_config,
+                               client_config_into_env_var = unused_client_config)
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_at_least_one()
         logging_results.test_event_type_at_least_one()
@@ -882,7 +890,7 @@ class TestCaseImpl(unittest.TestCase):
     def test_configs_empty_config(self) -> None:
         self.server_config = ObservabilityConfig({})
         self.client_config = ObservabilityConfig({})
-        self.setup_and_run_rpc('large_unary')
+        self.setup_and_run_rpc([InteropAction('large_unary')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_log_entries_zero()
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
@@ -920,7 +928,7 @@ class TestCaseImpl(unittest.TestCase):
         self.set_client_custom_labels({**CLIENT_CUSTOM_LABEL,
             'identifier': self.identifier,
         })
-        self.setup_and_run_rpc('large_unary')
+        self.setup_and_run_rpc([InteropAction('large_unary')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         logging_results.test_custom_labels(LoggerSide.SERVER, SERVER_CUSTOM_LABEL)
         logging_results.test_custom_labels(LoggerSide.CLIENT, CLIENT_CUSTOM_LABEL)
