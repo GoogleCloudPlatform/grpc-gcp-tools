@@ -84,13 +84,16 @@ export REPOS_BASE_DIR=${KOKORO_ARTIFACTS_DIR}/github
 #
 ##
 
+
+# TODO(stanleycheung): ideally the Kokoro job should be initiated from each lang's repo
+# so that we don't need to keep track of these details here.
+
 build_java () {
   mkdir -p ${REPOS_BASE_DIR}/grpc-java
-  git clone https://github.com/stanley-cheung/grpc-java ${REPOS_BASE_DIR}/grpc-java
+  git clone https://github.com/grpc/grpc-java ${REPOS_BASE_DIR}/grpc-java
   LANG='java'
   docker_image_tag
   (cd ${REPOS_BASE_DIR}/grpc-java && \
-    git checkout o11y-testing-${JOB_MODE} && \
     git log -1 --oneline && \
     ./buildscripts/observability-test/build_docker.sh && \
     docker push -q ${TAG_NAME})
@@ -98,11 +101,10 @@ build_java () {
 
 build_go () {
   mkdir -p ${REPOS_BASE_DIR}/grpc-go
-  git clone https://github.com/stanley-cheung/grpc-go ${REPOS_BASE_DIR}/grpc-go
+  git clone https://github.com/grpc/grpc-go ${REPOS_BASE_DIR}/grpc-go
   LANG='go'
   docker_image_tag
   (cd ${REPOS_BASE_DIR}/grpc-go && \
-    git checkout o11y-testing-${JOB_MODE} && \
     git log -1 --oneline && \
     ./interop/observability/build_docker.sh && \
     docker push -q ${TAG_NAME})
@@ -110,11 +112,10 @@ build_go () {
 
 build_cpp () {
   mkdir -p ${REPOS_BASE_DIR}/grpc
-  git clone https://github.com/stanley-cheung/grpc ${REPOS_BASE_DIR}/grpc
+  git clone https://github.com/grpc/grpc ${REPOS_BASE_DIR}/grpc
   LANG='cpp'
   docker_image_tag
   (cd ${REPOS_BASE_DIR}/grpc && \
-    git checkout o11y-testing-${JOB_MODE} && \
     git log -1 --oneline && \
     ./tools/dockerfile/observability-test/cpp/build_docker.sh && \
     docker push -q ${TAG_NAME})
