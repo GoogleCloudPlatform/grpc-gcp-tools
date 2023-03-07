@@ -1,0 +1,5 @@
+kubernetes~=25.3
+google-auth~=2.15
+google-cloud-logging~=3.4
+google-cloud-monitoring~=2.12
+google-cloud-trace~=1.8
