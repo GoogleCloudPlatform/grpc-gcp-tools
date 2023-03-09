@@ -90,10 +90,11 @@ export REPOS_BASE_DIR=${KOKORO_ARTIFACTS_DIR}/github
 
 build_java () {
   mkdir -p ${REPOS_BASE_DIR}/grpc-java
-  git clone https://github.com/grpc/grpc-java ${REPOS_BASE_DIR}/grpc-java
+  git clone ${GRPC_JAVA_REPO_PATH} ${REPOS_BASE_DIR}/grpc-java
   LANG='java'
   docker_image_tag
   (cd ${REPOS_BASE_DIR}/grpc-java && \
+    git checkout ${GRPC_JAVA_REPO_BRANCH} && \
     git log -1 --oneline && \
     ./buildscripts/observability-test/build_docker.sh && \
     docker push -q ${TAG_NAME})
@@ -101,10 +102,11 @@ build_java () {
 
 build_go () {
   mkdir -p ${REPOS_BASE_DIR}/grpc-go
-  git clone https://github.com/grpc/grpc-go ${REPOS_BASE_DIR}/grpc-go
+  git clone ${GRPC_GO_REPO_PATH} ${REPOS_BASE_DIR}/grpc-go
   LANG='go'
   docker_image_tag
   (cd ${REPOS_BASE_DIR}/grpc-go && \
+    git checkout ${GRPC_GO_REPO_BRANCH} && \
     git log -1 --oneline && \
     ./interop/observability/build_docker.sh && \
     docker push -q ${TAG_NAME})
@@ -112,10 +114,11 @@ build_go () {
 
 build_cpp () {
   mkdir -p ${REPOS_BASE_DIR}/grpc
-  git clone https://github.com/grpc/grpc ${REPOS_BASE_DIR}/grpc
+  git clone ${GRPC_GRPC_REPO_PATH} ${REPOS_BASE_DIR}/grpc
   LANG='cpp'
   docker_image_tag
   (cd ${REPOS_BASE_DIR}/grpc && \
+    git checkout ${GRPC_GRPC_REPO_BRANCH} && \
     git log -1 --oneline && \
     ./tools/dockerfile/observability-test/cpp/build_docker.sh && \
     docker push -q ${TAG_NAME})
