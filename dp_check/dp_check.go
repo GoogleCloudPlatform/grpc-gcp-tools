@@ -23,8 +23,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -43,7 +45,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/vishvananda/netlink"
 	"google.golang.org/grpc"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 	"google.golang.org/grpc/codes"
@@ -64,6 +65,9 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/fault/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	v3httppb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/load_balancing_policies/client_side_weighted_round_robin/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/load_balancing_policies/round_robin/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/load_balancing_policies/wrr_locality/v3"
 	v3adsgrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	v3discoverypb "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	structpb "google.golang.org/protobuf/types/known/structpb"
@@ -99,9 +103,16 @@ in conjunction with --skip="Service SRV DNS queries".`)
 	runningOS                   = runtime.GOOS
 )
 
-type adsStream v3adsgrpc.AggregatedDiscoveryService_StreamAggregatedResourcesClient
+type (
+	adsStream     v3adsgrpc.AggregatedDiscoveryService_StreamAggregatedResourcesClient
+	platformError string
+)
 
-type platformError string
+// Route an interface that is platform agnostic which provides a string representation
+// of the dst route.
+type Route interface {
+	String() string
+}
 
 func (k platformError) Error() string {
 	return fmt.Sprintf("%s is not supported", string(k))
@@ -120,7 +131,7 @@ const (
 
 	trafficDirectorPort             = "443"
 	userAgentName                   = "dp-check"
-	userAgentVersion                = "1.6"
+	userAgentVersion                = "1.8"
 	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
 	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
 	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
@@ -185,7 +196,27 @@ func fetchIPFromMetadataServer(addrFamilyStr string) (*net.IP, error) {
 	return nil, fmt.Errorf("Received status code %d in response to metadata server GET request to URL: %s. This is unexpected (we only expect status codes 200 or 404), and so this may indicate a bug", resp.StatusCode, metadataServerURL)
 }
 
-func findLocalAddress(ipMatches func(net.IP) bool) (*net.Interface, error) {
+func skipLoopback(iface net.Interface) error {
+	if iface.Flags&net.FlagLoopback != 0 {
+		return fmt.Errorf("interface has loopback flag")
+	}
+	if iface.Flags&net.FlagUp != net.FlagUp {
+		return fmt.Errorf("interface is not marked up")
+	}
+	return nil
+}
+
+func skipNonLoopback(iface net.Interface) error {
+	if iface.Flags&net.FlagLoopback == 0 {
+		return fmt.Errorf("interface does not have loopback flag")
+	}
+	if iface.Flags&net.FlagUp != net.FlagUp {
+		return fmt.Errorf("interface is not marked up")
+	}
+	return nil
+}
+
+func findLocalAddress(ipMatches func(net.IP) bool, ifaceFilter func(iface net.Interface) error) (*net.Interface, error) {
 	infoLog.Println("Check local addresses by iterating over all ip addresses from interfaces returned by: |net.Interfaces()|")
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -194,13 +225,11 @@ func findLocalAddress(ipMatches func(net.IP) bool) (*net.Interface, error) {
 	var match net.Interface
 	foundMatch := false
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagLoopback != 0 {
+		if err := ifaceFilter(iface); err != nil {
+			infoLog.Printf("Not checking interface: |Name: %s, hardware address: %s, flags: %s| because: %v", iface.Name, iface.HardwareAddr, iface.Flags, err)
 			continue
 		}
-		if iface.Flags&net.FlagUp != net.FlagUp {
-			continue
-		}
-		infoLog.Printf("Checking non-loopback and up network interface: |Name: %s, hardware address: %s, flags: %s|", iface.Name, iface.HardwareAddr, iface.Flags)
+		infoLog.Printf("Checking up network interface: |Name: %s, hardware address: %s, flags: %s|", iface.Name, iface.HardwareAddr, iface.Flags)
 		ifaddrs, err := iface.Addrs()
 		if err != nil {
 			return nil, err
@@ -223,67 +252,48 @@ func findLocalAddress(ipMatches func(net.IP) bool) (*net.Interface, error) {
 
 func checkLocalIPv6Addresses(ipv6FromMetadataServer *net.IP) (*net.Interface, error) {
 	if ipv6FromMetadataServer == nil {
-		return nil, fmt.Errorf("Skipping search for DirectPath-capable IPv6 address because the VM failed to get a valid IPv6 address from metadata server")
+		return nil, fmt.Errorf("skipping search for DirectPath-capable IPv6 address because the VM failed to get a valid IPv6 address from metadata server")
 	}
 	var err error
 	var iface *net.Interface
-	if iface, err = findLocalAddress(func(ip net.IP) bool { return ip.To4() == nil && ip.Equal(*ipv6FromMetadataServer) }); err != nil {
-		return nil, fmt.Errorf("Failed to find local DirectPath-capable IPv6 address: %v. This VM was expected to have a network interface with IPv6 address: %s assigned to it, but no such interface was found, it's likely that IPv6 DHCP setup either failed or hasn't been attempted", err, ipv6FromMetadataServer)
+	if iface, err = findLocalAddress(func(ip net.IP) bool { return ip.To4() == nil && ip.Equal(*ipv6FromMetadataServer) }, skipLoopback); err != nil {
+		return nil, fmt.Errorf("failed to find local DirectPath-capable IPv6 address: %v. This VM was expected to have a network interface with IPv6 address: %s assigned to it, but no such interface was found, it's likely that IPv6 DHCP setup either failed or hasn't been attempted", err, ipv6FromMetadataServer)
 	}
 	return iface, nil
 }
 
-func checkLocalIPv4Addresses(ipv4FromMetadataServer *net.IP) (*net.Interface, error) {
-	if ipv4FromMetadataServer == nil {
-		return nil, fmt.Errorf("Skipping search for DirectPath-capable IPv4 address because the VM failed to get a valid IPv4 address from metadata server")
+func checkLocalIPv6LoopbackAddress(ipv6FromMetadataServer *net.IP) error {
+	if ipv6FromMetadataServer == nil {
+		return fmt.Errorf("skipping search for IPv6 loopback address because the VM failed to get a valid IPv6 address from metadata server")
 	}
 	var err error
-	var iface *net.Interface
-	if iface, err = findLocalAddress(func(ip net.IP) bool { return ip.To4() != nil && ip.Equal(*ipv4FromMetadataServer) }); err != nil {
-		return nil, fmt.Errorf("Failed to find local DirectPath-capable IPv4 address: %v. This VM was expected to have a network interface with IPv4 address: %s assigned to it, but no such interface was found", err, ipv4FromMetadataServer)
-	}
-	return iface, nil
-}
-
-func findLocalRoute(iface net.Interface, addrFamily int, routeMatches func(netlink.Route) bool) error {
-	var addrFamilyStr string
-	if addrFamily == netlink.FAMILY_V4 {
-		addrFamilyStr = "IPv4"
-	} else if addrFamily == netlink.FAMILY_V6 {
-		addrFamilyStr = "IPv6"
-	} else {
-		return fmt.Errorf("Invalid address family %v is not IPv4 or IPv6", addrFamily)
-	}
-	infoLog.Printf("Check all %v routes on network interface |Name: %s, hardware address: %s, flags: %s| returned by |netlink.LinkByName(%s)|", addrFamilyStr, iface.Name, iface.HardwareAddr, iface.Flags, iface.Name)
-	link, err := netlink.LinkByName(iface.Name)
-	if err != nil {
-		return err
-	}
-	rl, err := netlink.RouteList(link, addrFamily)
-	if err != nil {
-		return fmt.Errorf("\"RouteList(link, addrFamily)\" failed: %v", err)
-	}
-	foundMatch := false
-	for _, r := range rl {
-		infoLog.Printf("Found %v route: |%s| on network interface |%s|", addrFamily, r, iface.Name)
-		if routeMatches(r) {
-			foundMatch = true
-		}
-	}
-	if !foundMatch {
-		return fmt.Errorf("failed to find matching route")
+	ipv6Loopback := net.IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1}
+	if _, err = findLocalAddress(func(ip net.IP) bool { return ip.To4() == nil && ip.Equal(ipv6Loopback) }, skipNonLoopback); err != nil {
+		return fmt.Errorf(`failed to find local IPv6 loopback address "::1" because: %v. Although this isn't inherently needed for Directpath connectivity, some gRPC client releases use a presence of the IPv6 loopback address as a heuristic to determine if the local runtime environment supports IPv6. So a lack of this address might prevent the client from being able to use IPv6`, err)
 	}
 	return nil
 }
 
+func checkLocalIPv4Addresses(ipv4FromMetadataServer *net.IP) (*net.Interface, error) {
+	if ipv4FromMetadataServer == nil {
+		return nil, fmt.Errorf("skipping search for DirectPath-capable IPv4 address because the VM failed to get a valid IPv4 address from metadata server")
+	}
+	var err error
+	var iface *net.Interface
+	if iface, err = findLocalAddress(func(ip net.IP) bool { return ip.To4() != nil && ip.Equal(*ipv4FromMetadataServer) }, skipLoopback); err != nil {
+		return nil, fmt.Errorf("failed to find local DirectPath-capable IPv4 address: %v. This VM was expected to have a network interface with IPv4 address: %s assigned to it, but no such interface was found", err, ipv4FromMetadataServer)
+	}
+	return iface, nil
+}
+
 func checkLocalIPv6Routes(directPathIPv6NetworkInterface *net.Interface) error {
 	if directPathIPv6NetworkInterface == nil {
-		return fmt.Errorf("Skipping IPv6 routes check because there is no valid directpath IPv6 network interface on this machine")
+		return fmt.Errorf("skipping IPv6 routes check because there is no valid directpath IPv6 network interface on this machine")
 	}
 	const route = "2001:4860:8040::/42"
 	infoLog.Printf("Search for an IPv6 route on network interface: %v matching: %v", directPathIPv6NetworkInterface.Name, route)
-	if err := findLocalRoute(*directPathIPv6NetworkInterface, netlink.FAMILY_V6, func(r netlink.Route) bool {
-		return strings.Contains(r.Dst.String(), route)
+	if err := findLocalRoute(*directPathIPv6NetworkInterface, net.IPv6len, func(r Route) bool {
+		return strings.Contains(r.String(), route)
 	}); err != nil {
 		return fmt.Errorf("Missing route prefix to backends: 2001:4860:8040::/42. IPv6 route setup likely either failed or hasn't been attempted. err: %v", err)
 	}
@@ -292,13 +302,13 @@ func checkLocalIPv6Routes(directPathIPv6NetworkInterface *net.Interface) error {
 
 func checkLocalIPv4Routes(directPathIPv4NetworkInterface *net.Interface, ipv4FromMetadataServer *net.IP, ipv4BalancerIPs []net.IP, balancerPort string) error {
 	if directPathIPv4NetworkInterface == nil {
-		return fmt.Errorf("Skipping IPv4 routes check because there is not valid DirectPath IPv4 network interface on this machine")
+		return fmt.Errorf("skipping IPv4 routes check because there is not valid DirectPath IPv4 network interface on this machine")
 	}
 	if len(ipv4BalancerIPs) == 0 {
-		return fmt.Errorf("Skipping IPv4 routes check because we didn't find any IPv4 load balancer addresses")
+		return fmt.Errorf("skipping IPv4 routes check because we didn't find any IPv4 load balancer addresses")
 	}
 	// First just log the routes on the candidate interface
-	if err := findLocalRoute(*directPathIPv4NetworkInterface, netlink.FAMILY_V4, func(r netlink.Route) bool { return true }); err != nil {
+	if err := findLocalRoute(*directPathIPv4NetworkInterface, net.IPv4len, func(r Route) bool { return true }); err != nil {
 		return err
 	}
 	sourceStr := net.JoinHostPort(ipv4FromMetadataServer.String(), "0")
@@ -348,7 +358,7 @@ func getBackendAddrsFromGrpclb(lbAddr string, balancerHostname string, srvQuerie
 		opts...,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create grpc connection to balancer: %v", err)
+		return nil, fmt.Errorf("failed to create grpc connection to balancer: %v", err)
 	}
 	infoLog.Printf("Successfully dialed balancer. Now send initial grpc request...")
 	lbClient := lbpb.NewLoadBalancerClient(conn)
@@ -361,10 +371,10 @@ func getBackendAddrsFromGrpclb(lbAddr string, balancerHostname string, srvQuerie
 		},
 	}
 	if err != nil {
-		return nil, fmt.Errorf("Failed to open stream to the balancer: %v", err)
+		return nil, fmt.Errorf("failed to open stream to the balancer: %v", err)
 	}
 	if err := stream.Send(initReq); err != nil {
-		return nil, fmt.Errorf("Failed to send initial grpc request to balancer: %v", err)
+		return nil, fmt.Errorf("failed to send initial grpc request to balancer: %v", err)
 	}
 	infoLog.Printf("Successfully sent initial grpc request to balancer: |%v|. Now wait for initial response...", initReq)
 	reply, err := stream.Recv()
@@ -379,7 +389,7 @@ func getBackendAddrsFromGrpclb(lbAddr string, balancerHostname string, srvQuerie
 		return nil, fmt.Errorf(`the BalanceLoad stream failed with status code: %v, error: %v. Because the earlier SRV record query for _grpclb._tcp.%s failed, this most likely indicates that %s is a DirectPath-enabled service, but that some attribute(s) of this specific VM (for example the VPC network project number of this VM's primary network interface, the VM project number, or the current region or zone we're running in), are causing this VM to be prevented DirectPath access to %s`, status.Code(err), err, *service, *service, *service)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("Failed to recv initial grpc response from balancer: %v", err)
+		return nil, fmt.Errorf("failed to recv initial grpc response from balancer: %v", err)
 	}
 	initResp := reply.GetInitialResponse()
 	if initResp == nil {
@@ -651,7 +661,7 @@ func ackXdsResponse(stream adsStream, node *v3corepb.Node, typeURL, resourceName
 		ResponseNonce: nonceMap[typeURL],
 	}
 	if err := stream.Send(ackReq); err != nil {
-		return fmt.Errorf("Failed to ack xDS response: %v", err)
+		return fmt.Errorf("failed to ack xDS response: %v", err)
 	}
 	return nil
 }
@@ -866,9 +876,16 @@ func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, er
 	return results, nil
 }
 
-func newNode(id, zone string, ipv6Capable bool) *v3corepb.Node {
+func newNode(zone string, ipv6Capable bool) *v3corepb.Node {
+	var r [8]byte
+	if _, err := rand.Read(r[:]); err != nil {
+		infoLog.Printf("failed to create random token: %v, node ID will not be unique", err)
+	}
+	var id strings.Builder
+	fmt.Fprintf(&id, "dp-check-xds-%d", binary.LittleEndian.Uint64(r[:]))
+	infoLog.Printf("ADS stream will use node ID: %s", id.String())
 	ret := &v3corepb.Node{
-		Id:                   id,
+		Id:                   id.String(),
 		UserAgentName:        userAgentName,
 		UserAgentVersionType: &v3corepb.Node_UserAgentVersion{UserAgentVersion: userAgentVersion},
 		ClientFeatures:       []string{clientFeatureNoOverprovisioning},
@@ -1005,7 +1022,7 @@ func getBackendAddrsFromTrafficDirector(ipv6Capable bool) ([]string, error) {
 	if err != nil {
 		return []string{}, fmt.Errorf("failed to get zone from metadata server: %v", err)
 	}
-	node := newNode("dp-check-xds", zone, ipv6Capable)
+	node := newNode(zone, ipv6Capable)
 	// XDS
 	versionInfoMap := map[string]string{
 		V3ListenerURL:    "",
@@ -1243,6 +1260,12 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		directPathIPv6NetworkInterface, err = checkLocalIPv6Addresses(ipv6FromMetadataServer)
 		return err
 	})
+	runCheck("Local IPv6 loopback address", func() error {
+		if skipIPv6Err != nil {
+			return &skipCheckError{err: skipIPv6Err}
+		}
+		return checkLocalIPv6LoopbackAddress(ipv6FromMetadataServer)
+	})
 	var directPathIPv4NetworkInterface *net.Interface
 	runCheck("Local IPv4 addresses", func() error {
 		if skipIPv4Err != nil {
@@ -1275,7 +1298,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 			return &skipCheckError{err: skipGrpclbErr}
 		}
 		if len(ipv6BalancerIPs) == 0 {
-			return fmt.Errorf("Skipping \"TCP/IPv6 connectivity to load balancers\" because prior DNS resolution of LB IPv6 address failed")
+			return fmt.Errorf("skipping \"TCP/IPv6 connectivity to load balancers\" because prior DNS resolution of LB IPv6 address failed")
 		}
 		addr := net.JoinHostPort(ipv6BalancerIPs[0].String(), balancerPort)
 		infoLog.Printf("Check TCP/IPv6 connectivity to LB's with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", addr)
@@ -1294,7 +1317,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 			return &skipCheckError{err: skipGrpclbErr}
 		}
 		if len(ipv4BalancerIPs) == 0 {
-			return fmt.Errorf("Skipping \"TCP/IPv4 connectivity to load balancers\" because prior DNS resolution of LB IPv4 address failed")
+			return fmt.Errorf("skipping \"TCP/IPv4 connectivity to load balancers\" because prior DNS resolution of LB IPv4 address failed")
 		}
 		addr := net.JoinHostPort(ipv4BalancerIPs[0].String(), balancerPort)
 		infoLog.Printf("Check TCP/IPv4 connectivity to LB's with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", addr)
@@ -1315,7 +1338,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 			return &skipCheckError{err: skipGrpclbErr}
 		}
 		if !tcpOverIPv6ToLoadBalancersSucceeded {
-			return fmt.Errorf("Skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
+			return fmt.Errorf("skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
 		}
 		var err error
 		ipv6BackendAddrs, err = resolveBackends(net.JoinHostPort(ipv6BalancerIPs[0].String(), balancerPort), balancerHostname, srvQueriesSucceeded)
@@ -1330,7 +1353,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 			return &skipCheckError{err: skipGrpclbErr}
 		}
 		if !tcpOverIPv4ToLoadBalancersSucceeded {
-			return fmt.Errorf("Skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
+			return fmt.Errorf("skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
 		}
 		var err error
 		ipv4BackendAddrs, err = resolveBackends(net.JoinHostPort(ipv4BalancerIPs[0].String(), balancerPort), balancerHostname, srvQueriesSucceeded)
@@ -1347,7 +1370,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 			return &skipCheckError{err: skipGrpclbErr}
 		}
 		if len(ipv6BackendAddrs) == 0 {
-			return fmt.Errorf("Skipping TCP connectivity to IPv6 backends because discovery of IPv6 backends failed")
+			return fmt.Errorf("skipping TCP connectivity to IPv6 backends because discovery of IPv6 backends failed")
 		}
 		infoLog.Printf("Check TCP connectivity to IPv6 backends with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", ipv6BackendAddrs[0])
 		if _, err := net.DialTimeout("tcp", ipv6BackendAddrs[0], time.Second*5); err != nil {
@@ -1437,7 +1460,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 			return &skipCheckError{err: skipIPv6Err}
 		}
 		if len(xdsIPv6BackendAddrs) == 0 {
-			return fmt.Errorf("Skipping TCP connectivity to IPv6 backends because discovery of IPv6 backends failed")
+			return fmt.Errorf("skipping TCP connectivity to IPv6 backends because discovery of IPv6 backends failed")
 		}
 		infoLog.Printf("Check TCP connectivity to IPv6 backends with:|net.DialTimeout(\"tcp\", \"%v\", time.Second*5)|...", xdsIPv6BackendAddrs[0])
 		if _, err := net.DialTimeout("tcp", xdsIPv6BackendAddrs[0], time.Second*5); err != nil {
