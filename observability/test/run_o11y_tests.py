@@ -524,7 +524,7 @@ class TestCaseImpl(unittest.TestCase):
         return identifier
 
     def get_server_start_cmd(self) -> str:
-        return 'docker run -e %s -e %s -v %s:%s --name %s %s server %s' % (
+        return 'docker run -e %s -e %s -v %s:%s --name %s %s server --port=%s' % (
             CONFIG_FILE_ENV_VAR_NAME,
             CONFIG_ENV_VAR_NAME,
             CONFIG_FILE_LOCAL_DIR,
@@ -535,20 +535,20 @@ class TestCaseImpl(unittest.TestCase):
 
     def get_client_action_cmd(self, action: InteropAction) -> str:
         server_container_name = self.get_server_container_name()
-        return 'docker run --rm -e %s -e %s -v %s:%s ' \
-            '--link %s:%s %s client %s %s %s %d' % (
-                CONFIG_FILE_ENV_VAR_NAME,
-                CONFIG_ENV_VAR_NAME,
-                CONFIG_FILE_LOCAL_DIR,
-                CONFIG_FILE_LOCAL_DIR,
-                server_container_name,
-                server_container_name,
-                CommonUtil.get_image_name(self.args.client_lang, self.args.job_mode),
-                # the order of the following parameters needs to match each lang's run.sh script
-                server_container_name,
-                self.args.port,
-                action.test_case,
-                action.num_times)
+        return 'docker run --rm -e %s -e %s -v %s:%s --link %s:%s %s client ' \
+          '--server_host=%s --server_port=%s ' \
+          '--test_case=%s --num_times=%d' % (
+              CONFIG_FILE_ENV_VAR_NAME,
+              CONFIG_ENV_VAR_NAME,
+              CONFIG_FILE_LOCAL_DIR,
+              CONFIG_FILE_LOCAL_DIR,
+              server_container_name,
+              server_container_name,
+              CommonUtil.get_image_name(self.args.client_lang, self.args.job_mode),
+              server_container_name,
+              self.args.port,
+              action.test_case,
+              action.num_times)
 
     @staticmethod
     def wait_before_querying_o11y_data() -> None:
