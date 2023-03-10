@@ -12,7 +12,7 @@ fi
 set -ex
 
 build_dp_check() {
-  cd dp_check && CGO_ENABLED=0 go build dp_check.go
+  cd dp_check && CGO_ENABLED=0 go build dp_check.go netlink_linux.go
   file dp_check | grep 'statically linked'
   if [ $? != 0 ]; then
     echo "dp_check binary is not statically linked"
