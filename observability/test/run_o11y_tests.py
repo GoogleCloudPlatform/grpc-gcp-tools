@@ -69,7 +69,6 @@ OBSERVABILITY_LOG_NAME = 'microservices.googleapis.com%2Fobservability%2Fgrpc'
 CONFIG_ENV_VAR_NAME = 'GRPC_GCP_OBSERVABILITY_CONFIG'
 CONFIG_FILE_ENV_VAR_NAME = 'GRPC_GCP_OBSERVABILITY_CONFIG_FILE'
 CONFIG_FILE_LOCAL_DIR = '/tmp'
-IMAGE_TAG = '1.53.0-dev'
 SUPPORTED_METRICS = [
     'custom.googleapis.com/opencensus/grpc.io/client/started_rpcs',
     'custom.googleapis.com/opencensus/grpc.io/server/started_rpcs',
@@ -111,7 +110,7 @@ def parse_args() -> argparse.Namespace:
 class CommonUtil:
     @staticmethod
     def get_image_name(lang: SupportedLang, job_mode: JobMode) -> str:
-        return 'gcr.io/%s/grpc-observability/testing/%s-%s:%s' % (PROJECT, job_mode, lang, IMAGE_TAG)
+        return str(os.environ.get('OBSERVABILITY_TEST_IMAGE_%s' % str(lang).upper()))
 
 class TestRunner:
     args: argparse.Namespace
