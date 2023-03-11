@@ -92,9 +92,9 @@ build_java () {
     ${GRPC_JAVA_REPO_PATH} ${REPOS_BASE_DIR}/grpc-java
   cd ${REPOS_BASE_DIR}/grpc-java
   LANG='java' docker_image_tag
-  gcloud container images describe ${TAG_NAME} && echo "Image already built, skipping..." || ( \
+  check_docker_image || ( \
     ./buildscripts/observability-test/build_docker.sh && \
-    docker push ${TAG_NAME})
+    docker push ${TAG_NAME} )
   export OBSERVABILITY_TEST_IMAGE_JAVA=${TAG_NAME}
 }
 
@@ -104,9 +104,9 @@ build_go () {
     ${GRPC_GO_REPO_PATH} ${REPOS_BASE_DIR}/grpc-go
   cd ${REPOS_BASE_DIR}/grpc-go
   LANG='go' docker_image_tag
-  gcloud container images describe ${TAG_NAME} && echo "Image already built, skipping..." || ( \
+  check_docker_image || ( \
     ./interop/observability/build_docker.sh && \
-    docker push ${TAG_NAME})
+    docker push ${TAG_NAME} )
   export OBSERVABILITY_TEST_IMAGE_GO=${TAG_NAME}
 }
 
@@ -116,10 +116,14 @@ build_cpp () {
     ${GRPC_GRPC_REPO_PATH} ${REPOS_BASE_DIR}/grpc
   cd ${REPOS_BASE_DIR}/grpc
   LANG='cpp' docker_image_tag
-  gcloud container images describe ${TAG_NAME} && echo "Image already built, skipping..." || ( \
+  check_docker_image || ( \
     ./tools/dockerfile/observability-test/cpp/build_docker.sh && \
-    docker push ${TAG_NAME})
+    docker push ${TAG_NAME} )
   export OBSERVABILITY_TEST_IMAGE_CPP=${TAG_NAME}
+}
+
+check_docker_image() {
+  gcloud container images describe ${TAG_NAME} && echo "Image already built, skipping..."
 }
 
 docker_image_tag () {
