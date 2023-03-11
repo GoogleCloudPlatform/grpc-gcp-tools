@@ -29,8 +29,6 @@ cd "$(dirname "$0")"
 PROJECT=microsvcs-testing
 CLUSTER=grpc-o11y-integration-testing-cluster
 ZONE=us-central1-c
-# TODO(stanleycheung): remove the need for this constant
-RELEASE=1.53.0-dev
 TEST_DIR=`realpath ../../observability/test`
 
 if [ -z "${JOB_MODE}" ] || [ -z "${LANGUAGE}" ] ; then
@@ -90,44 +88,43 @@ export REPOS_BASE_DIR=${KOKORO_ARTIFACTS_DIR}/github
 
 build_java () {
   mkdir -p ${REPOS_BASE_DIR}/grpc-java
-  git clone ${GRPC_JAVA_REPO_PATH} ${REPOS_BASE_DIR}/grpc-java
-  LANG='java'
-  docker_image_tag
-  (cd ${REPOS_BASE_DIR}/grpc-java && \
-    git checkout ${GRPC_JAVA_REPO_BRANCH} && \
-    git log -1 --oneline && \
+  git clone --single-branch --branch ${GRPC_JAVA_REPO_BRANCH} \
+    ${GRPC_JAVA_REPO_PATH} ${REPOS_BASE_DIR}/grpc-java
+  cd ${REPOS_BASE_DIR}/grpc-java
+  LANG='java' docker_image_tag
+  gcloud container images describe ${TAG_NAME} && echo "Image already built, skipping..." || ( \
     ./buildscripts/observability-test/build_docker.sh && \
-    docker push -q ${TAG_NAME})
+    docker push ${TAG_NAME})
+  export OBSERVABILITY_TEST_IMAGE_JAVA=${TAG_NAME}
 }
 
 build_go () {
   mkdir -p ${REPOS_BASE_DIR}/grpc-go
-  git clone ${GRPC_GO_REPO_PATH} ${REPOS_BASE_DIR}/grpc-go
-  LANG='go'
-  docker_image_tag
-  (cd ${REPOS_BASE_DIR}/grpc-go && \
-    git checkout ${GRPC_GO_REPO_BRANCH} && \
-    git log -1 --oneline && \
+  git clone --single-branch --branch ${GRPC_GO_REPO_BRANCH} \
+    ${GRPC_GO_REPO_PATH} ${REPOS_BASE_DIR}/grpc-go
+  cd ${REPOS_BASE_DIR}/grpc-go
+  LANG='go' docker_image_tag
+  gcloud container images describe ${TAG_NAME} && echo "Image already built, skipping..." || ( \
     ./interop/observability/build_docker.sh && \
-    docker push -q ${TAG_NAME})
+    docker push ${TAG_NAME})
+  export OBSERVABILITY_TEST_IMAGE_GO=${TAG_NAME}
 }
 
 build_cpp () {
   mkdir -p ${REPOS_BASE_DIR}/grpc
-  git clone ${GRPC_GRPC_REPO_PATH} ${REPOS_BASE_DIR}/grpc
-  LANG='cpp'
-  docker_image_tag
-  (cd ${REPOS_BASE_DIR}/grpc && \
-    git checkout ${GRPC_GRPC_REPO_BRANCH} && \
-    git log -1 --oneline && \
+  git clone --single-branch --branch ${GRPC_GRPC_REPO_BRANCH} \
+    ${GRPC_GRPC_REPO_PATH} ${REPOS_BASE_DIR}/grpc
+  cd ${REPOS_BASE_DIR}/grpc
+  LANG='cpp' docker_image_tag
+  gcloud container images describe ${TAG_NAME} && echo "Image already built, skipping..." || ( \
     ./tools/dockerfile/observability-test/cpp/build_docker.sh && \
-    docker push -q ${TAG_NAME})
+    docker push ${TAG_NAME})
+  export OBSERVABILITY_TEST_IMAGE_CPP=${TAG_NAME}
 }
 
 docker_image_tag () {
-  # TODO(stanleycheung): need a unique identifier in the docker image / tag name
-  #                      to make sure tests are running against this specific build
-  export TAG_NAME=gcr.io/${PROJECT}/grpc-observability/testing/${JOB_MODE}-${LANG}:${RELEASE}
+  SHORT_HASH=`git rev-parse --short HEAD`
+  export TAG_NAME=gcr.io/${PROJECT}/grpc-observability/testing/${JOB_MODE}-${LANG}:${SHORT_HASH}
 }
 
 if [ "${LANGUAGE}" = 'java' ] ; then
