@@ -110,7 +110,10 @@ def parse_args() -> argparse.Namespace:
 class CommonUtil:
     @staticmethod
     def get_image_name(lang: SupportedLang, job_mode: JobMode) -> str:
-        return str(os.environ.get('OBSERVABILITY_TEST_IMAGE_%s' % str(lang).upper()))
+        image_name = os.environ.get('OBSERVABILITY_TEST_IMAGE_%s' % str(lang).upper(), '')
+        if not image_name:
+            raise Exception('No docker image for %s is found' % lang)
+        return image_name
 
 class TestRunner:
     args: argparse.Namespace
@@ -448,6 +451,10 @@ class TestCaseImpl(unittest.TestCase):
         sponge_log_file = os.path.join(TestUtil.get_sponge_log_dir(
             self.args.job_mode, self.test_runner.job_name), 'sponge_log.log')
         self.sponge_log_out = open(sponge_log_file, 'a')
+        # TODO(stanleycheung): generalize this when we added back GKE tests
+        self.RESOURCE_TYPE = 'gce_instance'
+        if os.environ.get('RESOURCE_TYPE_ASSERTION_OVERRIDE'):
+            self.RESOURCE_TYPE = str(os.environ.get('RESOURCE_TYPE_ASSERTION_OVERRIDE'))
 
     def enable_server_logging(self, method_filters: Optional[List] = None) -> None:
         self.server_config.setdefault('cloud_logging', {})
@@ -523,24 +530,26 @@ class TestCaseImpl(unittest.TestCase):
         return identifier
 
     def get_server_start_cmd(self) -> str:
-        return 'docker run -e %s -e %s -v %s:%s --name %s %s server --port=%s' % (
+        return 'docker run -e %s -e %s -v %s:%s %s --name %s %s server --port=%s' % (
             CONFIG_FILE_ENV_VAR_NAME,
             CONFIG_ENV_VAR_NAME,
             CONFIG_FILE_LOCAL_DIR,
             CONFIG_FILE_LOCAL_DIR,
+            os.environ.get('CUSTOM_DOCKER_RUN_AUTH', ''),
             self.get_server_container_name(),
             CommonUtil.get_image_name(self.args.server_lang, self.args.job_mode),
             self.args.port)
 
     def get_client_action_cmd(self, action: InteropAction) -> str:
         server_container_name = self.get_server_container_name()
-        return 'docker run --rm -e %s -e %s -v %s:%s --link %s:%s %s client ' \
+        return 'docker run --rm -e %s -e %s -v %s:%s %s --link %s:%s %s client ' \
           '--server_host=%s --server_port=%s ' \
           '--test_case=%s --num_times=%d' % (
               CONFIG_FILE_ENV_VAR_NAME,
               CONFIG_ENV_VAR_NAME,
               CONFIG_FILE_LOCAL_DIR,
               CONFIG_FILE_LOCAL_DIR,
+              os.environ.get('CUSTOM_DOCKER_RUN_AUTH', ''),
               server_container_name,
               server_container_name,
               CommonUtil.get_image_name(self.args.client_lang, self.args.job_mode),
@@ -657,7 +666,7 @@ class TestCaseImpl(unittest.TestCase):
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
         for metric_name in SUPPORTED_METRICS:
             metrics_results.test_time_series_at_least_one(metric_name)
-            metrics_results.test_metric_resource_type(metric_name, 'gce_instance')
+            metrics_results.test_metric_resource_type(metric_name, self.RESOURCE_TYPE)
             metrics_results.test_metric_resource_labels(metric_name, {
                 'project_id': PROJECT,
             })
@@ -701,7 +710,7 @@ class TestCaseImpl(unittest.TestCase):
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
         for metric_name in SUPPORTED_METRICS:
             metrics_results.test_time_series_at_least_one(metric_name)
-            # metrics_results.test_metric_resource_type(metric_name, 'gce_instance')
+            metrics_results.test_metric_resource_type(metric_name, self.RESOURCE_TYPE)
             metrics_results.test_metric_resource_labels(metric_name, {
                 'project_id': PROJECT
             })
@@ -842,7 +851,7 @@ class TestCaseImpl(unittest.TestCase):
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
         for metric_name in SUPPORTED_METRICS:
             metrics_results.test_time_series_at_least_one(metric_name)
-            metrics_results.test_metric_resource_type(metric_name, 'gce_instance')
+            metrics_results.test_metric_resource_type(metric_name, self.RESOURCE_TYPE)
             metrics_results.test_metric_resource_labels(metric_name, {
                 'project_id': PROJECT
             })
@@ -877,7 +886,7 @@ class TestCaseImpl(unittest.TestCase):
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
         for metric_name in SUPPORTED_METRICS:
             metrics_results.test_time_series_at_least_one(metric_name)
-            metrics_results.test_metric_resource_type(metric_name, 'gce_instance')
+            metrics_results.test_metric_resource_type(metric_name, self.RESOURCE_TYPE)
             metrics_results.test_metric_resource_labels(metric_name, {
                 'project_id': PROJECT
             })

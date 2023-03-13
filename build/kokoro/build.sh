@@ -88,7 +88,10 @@ export REPOS_BASE_DIR=${KOKORO_ARTIFACTS_DIR}/github
 
 docker_image_tag () {
   SHORT_HASH=`git rev-parse --short HEAD`
-  export TAG_NAME=gcr.io/${PROJECT}/grpc-observability/testing/${JOB_MODE}-${LANG}:${SHORT_HASH}
+  IMAGE_NAME=gcr.io/${PROJECT}/grpc-observability/testing/${JOB_MODE}-${LANG}
+  # TODO(stanleycheung): use a more descriptive name than TAG_NAME, need to change all repos
+  export TAG_NAME=${IMAGE_NAME}:${SHORT_HASH}
+  IMAGE_TAG_LATEST=${IMAGE_NAME}:latest
 }
 
 check_docker_image() {
@@ -100,7 +103,11 @@ prepare_docker_image() {
   git clone --single-branch --branch ${GIT_CLONE_BRANCH} ${GIT_CLONE_PATH} ${REPOS_BASE_DIR}/${REPO_NAME}
   cd ${REPOS_BASE_DIR}/${REPO_NAME}
   docker_image_tag
-  check_docker_image || ( $BUILD_DOCKER_FUNC && docker push ${TAG_NAME} )
+  check_docker_image || ( \
+    $BUILD_DOCKER_FUNC && \
+    docker tag ${TAG_NAME} ${IMAGE_TAG_LATEST} && \
+    docker push ${TAG_NAME} && \
+    docker push ${IMAGE_TAG_LATEST} )
   export $DOCKER_IMAGE_ENV_VAR_NAME=${TAG_NAME}
 }
 
