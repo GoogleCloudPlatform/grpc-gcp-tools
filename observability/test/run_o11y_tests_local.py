@@ -28,12 +28,12 @@ SPONGE_LOGS_DIR = '/tmp/observability_test_log' # a directory in your local envi
 DOCKER_IMAGE_NAME = 'gcr.io/microsvcs-testing/grpc-observability/testing/integration-%s:latest'
 
 argp = argparse.ArgumentParser(description='Run Observability integration tests in local env')
-argp.add_argument('--server_lang', required=True, type=str,
-                  help='Server language: java | go | cpp')
-argp.add_argument('--client_lang', required=True, type=str,
-                  help='Client language: java | go | cpp')
+argp.add_argument('--server_lang', required=True, type=str, choices=['java', 'go', 'cpp'],
+                  help='Server language')
+argp.add_argument('--client_lang', required=True, type=str, choices=['java', 'go', 'cpp'],
+                  help='Client language')
 argp.add_argument('--test_case', required=True, type=str,
-                  help='Test case to run: check test_utils.py')
+                  help='Test case to run: see test_utils.py')
 argp.add_argument('--docker_image_go', default=DOCKER_IMAGE_NAME % 'go', type=str,
                   help='docker image tag for Go interop client/server')
 argp.add_argument('--docker_image_java', default=DOCKER_IMAGE_NAME % 'java', type=str,
