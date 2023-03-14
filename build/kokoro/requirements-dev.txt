@@ -1,2 +1,3 @@
 -r requirements.txt
 mypy~=0.991
+docker~=6.0.1
