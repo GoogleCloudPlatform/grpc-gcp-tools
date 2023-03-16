@@ -64,7 +64,7 @@ def prepare_docker_image(lang):
         except:
             logger.error("Still could not find docker image '%s'. Exiting...'" % image_name)
             sys.exit(1)
-    logger.info("Using local docker image '%s'" % image_name)
+    logger.info("Using docker image '%s'" % image_name)
     os.environ['OBSERVABILITY_TEST_IMAGE_%s' % lang.upper()] = image_name
 
 def main():
