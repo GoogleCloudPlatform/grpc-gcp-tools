@@ -24,7 +24,8 @@ from test_utils import (
     ObservabilityTestCase
 )
 
-SPONGE_LOGS_DIR = '/tmp/observability_test_log' # a directory in your local environment for logs
+# a directory in your local environment for logs
+SPONGE_LOGS_DIR = '/tmp/observability_test_log_%s' % os.environ.get('USER', 'user')
 DOCKER_IMAGE_NAME = 'gcr.io/microsvcs-testing/grpc-observability/testing/integration-%s:latest'
 
 argp = argparse.ArgumentParser(description='Run Observability integration tests in local env')
