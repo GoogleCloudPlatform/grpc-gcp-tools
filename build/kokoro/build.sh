@@ -60,12 +60,6 @@ sudo apt-get -qq install -y \
 python3 --version
 python3 -m pip install -r requirements.lock
 
-# Install Go
-curl -sSL https://go.dev/dl/go1.17.13.linux-amd64.tar.gz -o /tmp/go1.17.13.linux-amd64.tar.gz
-echo '0b5858bc0f90dd17536df3a4d7635cc576b2c507 /tmp/go1.17.13.linux-amd64.tar.gz' | sha1sum -c -
-sudo tar -C /usr/local -xzf /tmp/go1.17.13.linux-amd64.tar.gz
-export PATH=${PATH}:/usr/local/go/bin
-
 # Configure GKE and docker auth
 export USE_GKE_GCLOUD_AUTH_PLUGIN=True
 gcloud container clusters get-credentials ${CLUSTER} --zone ${ZONE}

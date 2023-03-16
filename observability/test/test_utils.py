@@ -40,6 +40,11 @@ class ObservabilityTestCase(str, Enum):
     TEST_CONFIGS_NO_CONFIG = 'test_configs_no_config'
     TEST_CONFIGS_INVALID_CONFIG = 'test_configs_invalid_config'
     TEST_CONFIGS_CUSTOM_LABELS = 'test_configs_custom_labels'
+    TEST_METRICS_BASIC = 'test_metrics_basic'
+    TEST_METRICS_LATENCY = 'test_metrics_latency'
+    TEST_METRICS_MESSAGE_BYTES = 'test_metrics_message_bytes'
+    TEST_TRACE_MESSAGE_BYTES = 'test_trace_message_bytes'
+    TEST_LOGGING_CONNECT_TRACE = 'test_logging_connect_trace'
 
     def __str__(self) -> str:
         return self.value
