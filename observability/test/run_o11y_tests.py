@@ -349,7 +349,6 @@ class CloudMonitoringInterface(unittest.TestCase):
             'custom.googleapis.com/opencensus/grpc.io/server/started_rpcs',
             'custom.googleapis.com/opencensus/grpc.io/server/completed_rpcs',
         ]:
-            # TODO(stanleycheung): fill in actual assertions after manual tests
             logger.info('%s %d' % (metric_name, self.results[metric_name][0].points[0].value.int64_value))
             self.assertEqual(self.results[metric_name][0].points[0].value.int64_value, num_rpcs)
 
@@ -359,13 +358,18 @@ class CloudMonitoringInterface(unittest.TestCase):
             'custom.googleapis.com/opencensus/grpc.io/client/api_latency',
             'custom.googleapis.com/opencensus/grpc.io/server/server_latency',
         ]:
-            # TODO(stanleycheung): fill in actual assertions after manual tests
-            if len(self.results[metric_name]) == 0:
-                logger.info('%s not found' % metric_name)
-            else:
-                logger.info('%s %.2f' %
-                            (metric_name,
-                             self.results[metric_name][0].points[0].value.distribution_value.mean))
+            logger.info('%s %.2f' %
+                        (metric_name,
+                         self.results[metric_name][0].points[0].value.distribution_value.mean))
+            self.assertGreater(self.results[metric_name][0].points[0].value.distribution_value.mean, 0)
+        # per attempt latency
+        metric_name = 'custom.googleapis.com/opencensus/grpc.io/client/roundtrip_latency'
+        roundtrip_latency = self.results[metric_name][0].points[0].value.distribution_value.mean
+        # per call latency
+        metric_name = 'custom.googleapis.com/opencensus/grpc.io/client/api_latency'
+        api_latency = self.results[metric_name][0].points[0].value.distribution_value.mean
+        # per attempt latency should be less than per call latency
+        self.assertLess(roundtrip_latency, api_latency)
 
     def test_metrics_message_bytes(self) -> None:
         for metric_name in [
@@ -374,13 +378,11 @@ class CloudMonitoringInterface(unittest.TestCase):
             'custom.googleapis.com/opencensus/grpc.io/server/sent_compressed_message_bytes_per_rpc',
             'custom.googleapis.com/opencensus/grpc.io/server/received_compressed_message_bytes_per_rpc',
         ]:
-            # TODO(stanleycheung): fill in actual assertions after manual tests
-            if len(self.results[metric_name]) == 0:
-                logger.info('%s not found' % metric_name)
-            else:
-                logger.info('%s %.2f' %
-                            (metric_name,
-                             self.results[metric_name][0].points[0].value.distribution_value.mean))
+            logger.info('%s %.2f' %
+                        (metric_name,
+                         self.results[metric_name][0].points[0].value.distribution_value.mean))
+            # TODO(stanleycheung): improve this assertion to be more specific
+            self.assertGreater(self.results[metric_name][0].points[0].value.distribution_value.mean, 0)
 
 class CloudTraceInterface(unittest.TestCase):
     TESTING_SPAN_PREFIX = 'grpc.testing.TestService'
@@ -1004,7 +1006,6 @@ class TestCaseImpl(unittest.TestCase):
         self.enable_client_monitoring()
         self.setup_and_run_rpc([InteropAction('large_unary', num_times = 98)])
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
-        # TODO(stanleycheung): fill in actual assertions after manual verification
         metrics_results.test_metrics_basic(num_rpcs = 98)
 
     def test_metrics_latency(self) -> None:
@@ -1012,7 +1013,6 @@ class TestCaseImpl(unittest.TestCase):
         self.enable_client_monitoring()
         self.setup_and_run_rpc([InteropAction('large_unary', num_times = 100)])
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
-        # TODO(stanleycheung): fill in actual assertions after manual verification
         metrics_results.test_metrics_latency()
 
     def test_metrics_message_bytes(self) -> None:
@@ -1020,31 +1020,19 @@ class TestCaseImpl(unittest.TestCase):
         self.enable_client_monitoring()
         self.setup_and_run_rpc([InteropAction('large_unary')])
         metrics_results = CloudMonitoringInterface.query_metrics_from_cloud(self)
-        # TODO(stanleycheung): fill in actual assertions after manual verification
         metrics_results.test_metrics_message_bytes()
-
-    def test_trace_message_bytes(self) -> None:
-        self.enable_all_config()
-        self.setup_and_run_rpc([InteropAction('large_unary')])
-        trace_results = CloudTraceInterface.query_traces_from_cloud(self)
-        # TODO(stanleycheung): the cloud trace_v2 SDK may not give us what we need
-        #                      i.e. the MessageEvent sub-object in a trace
-        logger.info(trace_results.results[0])
 
     def test_logging_connect_trace(self) -> None:
         self.enable_all_config()
         self.setup_and_run_rpc([InteropAction('large_unary')])
         logging_results = CloudLoggingInterface.query_logging_entries_from_cloud(self)
         trace_results = CloudTraceInterface.query_traces_from_cloud(self)
-        # TODO(stanleycheung): figure out why log_entry.span_id and trace.spans[0].span_id
-        #                      don't match
-        logger.info('Log entries:')
-        for entry in logging_results.results:
-            logger.info('type:%s trace:%s span_id:%s' % (entry.payload['type'], entry.trace, entry.span_id))
-        logger.info('Traces:')
+        trace_ids = []
         for trace in trace_results.results:
-            for span in trace.spans:
-                logger.info('trace id: %s span id: %s name: %s' % (trace.trace_id, span.span_id, span.name))
+            trace_ids.append(trace.trace_id)
+        for entry in logging_results.results:
+            trace_id = entry.trace.split('/')[-1]
+            self.assertTrue(trace_id in trace_ids)
 
 # Main
 if __name__ == "__main__":
