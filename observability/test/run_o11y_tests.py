@@ -1030,6 +1030,7 @@ class TestCaseImpl(unittest.TestCase):
         trace_ids = []
         for trace in trace_results.results:
             trace_ids.append(trace.trace_id)
+        logger.info('Testing whether log entry.trace matches trace_id from traces')
         for entry in logging_results.results:
             trace_id = entry.trace.split('/')[-1]
             self.assertTrue(trace_id in trace_ids)
