@@ -43,7 +43,6 @@ class ObservabilityTestCase(str, Enum):
     TEST_METRICS_BASIC = 'test_metrics_basic'
     TEST_METRICS_LATENCY = 'test_metrics_latency'
     TEST_METRICS_MESSAGE_BYTES = 'test_metrics_message_bytes'
-    TEST_TRACE_MESSAGE_BYTES = 'test_trace_message_bytes'
     TEST_LOGGING_CONNECT_TRACE = 'test_logging_connect_trace'
 
     def __str__(self) -> str:
