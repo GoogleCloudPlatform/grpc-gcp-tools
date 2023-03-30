@@ -982,12 +982,14 @@ class TestCaseImpl(unittest.TestCase):
 
     def test_configs_invalid_config(self) -> None:
         env = os.environ.copy()
-        env[CONFIG_ENV_VAR_NAME] = 'an_invalid_config'
-        server_proc = self.start_server_in_subprocess(env = env)
-        server_proc.wait(timeout=5)
-        logger.info('Expecting error from server returncode = %d' % server_proc.returncode)
-        self.assertGreater(server_proc.returncode, 0)
-        self.kill_server_docker_container()
+        for invalid_config in ['', 'an_invalid_config']:
+            self.initialize_config()
+            env[CONFIG_ENV_VAR_NAME] = invalid_config
+            server_proc = self.start_server_in_subprocess(env = env)
+            server_proc.wait(timeout=5)
+            logger.info('Expecting error from server returncode = %d' % server_proc.returncode)
+            self.assertGreater(server_proc.returncode, 0)
+            self.kill_server_docker_container()
 
     def test_configs_custom_labels(self) -> None:
         SERVER_CUSTOM_LABEL = {'server_app_version': 'v314.15'}
