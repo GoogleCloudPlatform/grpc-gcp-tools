@@ -40,6 +40,7 @@ class ObservabilityTestCase(str, Enum):
     TEST_CONFIGS_NO_CONFIG = 'test_configs_no_config'
     TEST_CONFIGS_INVALID_CONFIG = 'test_configs_invalid_config'
     TEST_CONFIGS_CUSTOM_LABELS = 'test_configs_custom_labels'
+    TEST_TRACE_DIFF_SETTING_ENDPOINTS = 'test_trace_diff_setting_endpoints'
     TEST_METRICS_BASIC = 'test_metrics_basic'
     TEST_METRICS_LATENCY = 'test_metrics_latency'
     TEST_METRICS_MESSAGE_BYTES = 'test_metrics_message_bytes'

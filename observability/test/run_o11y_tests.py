@@ -155,6 +155,7 @@ class TestRunner:
             test_case_func = getattr(impl, str(self.args.test_case))
             logger.info('Executing TestCaseImpl.%s()' % self.args.test_case)
             test_case_func()
+            impl.sponge_log_out.close()
         except Exception as e:
             self.exc = e
             logger.error(traceback.format_exc())
@@ -415,6 +416,12 @@ class CloudTraceInterface(unittest.TestCase):
                     break
         logger.debug('Found %d traces' % len(self.results))
 
+    def print_basic_debug(self) -> None:
+        for trace in self.results:
+            logger.info('Found trace_id %s' % trace.trace_id)
+            for span in trace.spans:
+                logger.info('  Found span %s' % span.name)
+
     def copy_to_dict(self, obj: Dict) -> Dict:
         return {key: value for key, value in obj.items()}
 
@@ -451,7 +458,12 @@ class CloudTraceInterface(unittest.TestCase):
     def test_trace_zero_recv_span(self) -> None:
         self.assertFalse(self.has_recv_span())
 
-    def test_traces_count(self, lower_bound: int, upper_bound: int) -> None:
+    def test_traces_count(self, num_traces: int) -> None:
+        self.assertEqual(self.count_total(), num_traces,
+                         'Expect %d traces. Found %d instead' % (
+                             num_traces, self.count_total()))
+
+    def test_traces_count_range(self, lower_bound: int, upper_bound: int) -> None:
         num_traces = self.count_total()
         self.assertTrue(num_traces >= lower_bound and num_traces <= upper_bound)
 
@@ -479,8 +491,18 @@ class TestCaseImpl(unittest.TestCase):
                  test_runner: TestRunner) -> None:
         self.test_runner = test_runner
         self.args = test_runner.args
-        self.identifier = self.generate_identifier()
         self.test_run_metadata = TestRunMetadata()
+        self.initialize_config()
+        sponge_log_file = os.path.join(TestUtil.get_sponge_log_dir(
+            self.args.job_mode, self.test_runner.job_name), 'sponge_log.log')
+        self.sponge_log_out = open(sponge_log_file, 'a')
+        # TODO(stanleycheung): generalize this when we added back GKE tests
+        self.RESOURCE_TYPE = 'gce_instance'
+        if os.environ.get('RESOURCE_TYPE_ASSERTION_OVERRIDE'):
+            self.RESOURCE_TYPE = str(os.environ.get('RESOURCE_TYPE_ASSERTION_OVERRIDE'))
+
+    def initialize_config(self) -> None:
+        self.identifier = self.generate_identifier()
         self.server_config = ObservabilityConfig({
             'project_id': PROJECT,
             'labels': {
@@ -497,13 +519,6 @@ class TestCaseImpl(unittest.TestCase):
                 'identifier': self.identifier
             }
         })
-        sponge_log_file = os.path.join(TestUtil.get_sponge_log_dir(
-            self.args.job_mode, self.test_runner.job_name), 'sponge_log.log')
-        self.sponge_log_out = open(sponge_log_file, 'a')
-        # TODO(stanleycheung): generalize this when we added back GKE tests
-        self.RESOURCE_TYPE = 'gce_instance'
-        if os.environ.get('RESOURCE_TYPE_ASSERTION_OVERRIDE'):
-            self.RESOURCE_TYPE = str(os.environ.get('RESOURCE_TYPE_ASSERTION_OVERRIDE'))
 
     def enable_server_logging(self, method_filters: Optional[List] = None) -> None:
         self.server_config.setdefault('cloud_logging', {})
@@ -698,7 +713,6 @@ class TestCaseImpl(unittest.TestCase):
             os.kill(server_proc.pid, signal.SIGKILL)
             self.kill_server_docker_container()
             server_proc.wait(timeout=5)
-            self.sponge_log_out.close()
             if exc:
                 raise exc
 
@@ -890,7 +904,7 @@ class TestCaseImpl(unittest.TestCase):
         self.setup_and_run_rpc([InteropAction('large_unary', num_times = 20)])
         trace_results = CloudTraceInterface.query_traces_from_cloud(self)
         # With 50%, we should get 5-15 traces with 98.8% probability
-        trace_results.test_traces_count(5, 15)
+        trace_results.test_traces_count_range(5, 15)
 
     def test_configs_env_var(self) -> None:
         self.enable_all_config()
@@ -965,7 +979,6 @@ class TestCaseImpl(unittest.TestCase):
         logger.info('Expecting error from server returncode = %d' % server_proc.returncode)
         self.assertGreater(server_proc.returncode, 0)
         self.kill_server_docker_container()
-        self.sponge_log_out.close()
 
     def test_configs_invalid_config(self) -> None:
         env = os.environ.copy()
@@ -975,7 +988,6 @@ class TestCaseImpl(unittest.TestCase):
         logger.info('Expecting error from server returncode = %d' % server_proc.returncode)
         self.assertGreater(server_proc.returncode, 0)
         self.kill_server_docker_container()
-        self.sponge_log_out.close()
 
     def test_configs_custom_labels(self) -> None:
         SERVER_CUSTOM_LABEL = {'server_app_version': 'v314.15'}
@@ -1034,6 +1046,47 @@ class TestCaseImpl(unittest.TestCase):
         for entry in logging_results.results:
             trace_id = entry.trace.split('/')[-1]
             self.assertTrue(trace_id in trace_ids)
+
+    def _test_trace_diff_setting_endpoints(self,
+                                           server_trace_config: Optional[Dict[str, Any]],
+                                           client_trace_config: Optional[Dict[str, Any]]) -> None:
+        self.initialize_config()
+        self.enable_server_trace(server_trace_config)
+        self.enable_client_trace(client_trace_config)
+        self.setup_and_run_rpc([InteropAction('large_unary', num_times = 10)])
+
+    def test_trace_diff_setting_endpoints(self) -> None:
+        self._test_trace_diff_setting_endpoints(server_trace_config = {
+            'sampling_rate': 0.00
+        }, client_trace_config = {
+            'sampling_rate': 0.00
+        })
+        trace_results = CloudTraceInterface.query_traces_from_cloud(self)
+        trace_results.test_traces_count(0)
+
+        self._test_trace_diff_setting_endpoints(server_trace_config = {
+            'sampling_rate': 0.00
+        }, client_trace_config = {
+            'sampling_rate': 1.00
+        })
+        trace_results = CloudTraceInterface.query_traces_from_cloud(self)
+        trace_results.test_traces_count(10)
+        if not trace_results.has_recv_span():
+            self.fail('Should have some Recv span')
+        if not trace_results.has_sent_span():
+            self.fail('Should have some Sent span')
+
+        self._test_trace_diff_setting_endpoints(server_trace_config = {
+            'sampling_rate': 1.00
+        }, client_trace_config = {
+            'sampling_rate': 0.00
+        })
+        trace_results = CloudTraceInterface.query_traces_from_cloud(self)
+        trace_results.test_traces_count(10)
+        if trace_results.has_sent_span():
+            self.fail('Should not have any Sent span')
+        if not trace_results.has_recv_span():
+            self.fail('Should have some Recv span')
 
 # Main
 if __name__ == "__main__":
