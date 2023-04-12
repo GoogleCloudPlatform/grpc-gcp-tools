@@ -1174,7 +1174,7 @@ a) %s is not a DirectPath-enabled service
 b) The query was rejected because some attribute(s) of this specific VM (for example the VPC network project number of this VM's primary network interface, the VM project number, or the current region or zone we're running in), are causing this VM to be prevented DirectPath access to %s.
 c) Something is broken i.e. there is a serious bug somewhere.
 
-See results of LB query below which may give help in diagnosing which case we fall into.`, *service, err, *service)
+See results of LB query below which may give help in diagnosing which case we fall into.`, *service, err, *service, *service)
 		}
 		if len(srvs) != 1 {
 			return fmt.Errorf("Got %d SRV records:|%v|. This is not necessarily an error but is unexpected", len(srvs), srvs)
