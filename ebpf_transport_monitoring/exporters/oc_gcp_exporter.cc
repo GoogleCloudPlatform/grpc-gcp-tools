@@ -243,6 +243,7 @@ absl::Status OCGCPMetricExporter::RegisterMetric(std::string name,
   }
 
   descriptor.set_aggregation(*agg);
+  descriptor.set_expiry_duration(absl::Seconds(120));
 
   for (auto& tag : default_tag_vector_) {
     descriptor.add_column(tag.first);

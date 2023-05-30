@@ -128,6 +128,7 @@ bpf_program(
         "//sources/common:vmlinux",
         "//sources/common:defines",
         "@libbpf",
+        "//third_party/include:stdarg",
     ],
 )
 
@@ -141,5 +142,6 @@ bpf_program(
         "//sources/common:vmlinux",
         "//sources/common:defines",
         "@libbpf",
+        "//third_party/include:stdarg",
     ],
 )

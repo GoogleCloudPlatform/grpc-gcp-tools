@@ -30,8 +30,8 @@
 #include "loader/source/os_helper.h"
 #include "loader/source/archive_handler.h"
 
-extern unsigned char _binary_min_core_btfs_tar_gz_start[] __attribute__((weak));
-extern unsigned char _binary_min_core_btfs_tar_gz_end[] __attribute__((weak));
+extern unsigned char _binary_reduced_btfs_tar_gz_start[] __attribute__((weak));
+extern unsigned char _binary_reduced_btfs_tar_gz_end[] __attribute__((weak));
 
 namespace prober {
 
@@ -45,12 +45,12 @@ static absl::StatusOr<std::string> GetBtfFilePath(){
     auto path = helper.GetBtfArchivePath();
     if (!path.ok()) return path.status();
 
-    if (!_binary_min_core_btfs_tar_gz_start) {
+    if (!_binary_reduced_btfs_tar_gz_start) {
       return absl::InternalError("Reduced binary not linked");
     }
 
-    prober::ArchiveHandler handler(_binary_min_core_btfs_tar_gz_start,
-    _binary_min_core_btfs_tar_gz_end - _binary_min_core_btfs_tar_gz_start);
+    prober::ArchiveHandler handler(_binary_reduced_btfs_tar_gz_start,
+    _binary_reduced_btfs_tar_gz_end - _binary_reduced_btfs_tar_gz_start);
 
     status = handler.Init();
     if (!status.ok()) return status;

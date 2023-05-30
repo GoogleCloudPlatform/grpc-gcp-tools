@@ -16,8 +16,15 @@ package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "btf_min",
-    srcs = ["vmlinux_tcp_bpf.o"],
     alwayslink = True,
+    deps = [":reduced_btf"]
+)
+
+genrule(
+    name = "reduced_btf",
+    srcs = ["reduced_btfs.tar.gz"],
+    outs = ["reduced_btf.o"],
+    cmd = "ld -r -b binary $(locations reduced_btfs.tar.gz) -o $@",
 )
 
 cc_library(
