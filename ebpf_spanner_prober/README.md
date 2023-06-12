@@ -12,6 +12,7 @@ You can grant Spanner Admin role to the prober to create instance, database, tab
 1. Clone repo:
    ```
    git clone https://github.com/GoogleCloudPlatform/grpc-gcp-tools.git
+   cd grpc-gcp-tools
    ```
 1. Build image:
    ```
@@ -27,6 +28,16 @@ The prober will try to create the instance, database, and the table if any of th
 The prober will ship metrics to Cloud Monitoring and logs to Cloud Logging.
 
 Please check spanner_prober [README](https://github.com/GoogleCloudPlatform/grpc-gcp-go/tree/main/spanner_prober) and eBPF prober (lightfoot) [README](https://github.com/GoogleCloudPlatform/grpc-gcp-tools/blob/master/ebpf_transport_monitoring) before running.
+
+To check whether the eBPF prober can run properly run `ebpf_transport_monitoring/check_environment.sh` on the host (not in the container). The output should look like:
+
+```
+Kernel compiled with eBPF support
+Kernel compiled with vmlinux support
+You can use ebpf-transport-monitoring binary
+```
+
+## References
 
 [Spanner prober command line options](https://github.com/GoogleCloudPlatform/grpc-gcp-go/tree/main/spanner_prober#arguments)
 
