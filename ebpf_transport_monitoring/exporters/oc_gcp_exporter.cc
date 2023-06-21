@@ -234,7 +234,7 @@ absl::Status OCGCPMetricExporter::RegisterMetric(std::string name,
   GetMesure(name, desc);
   auto descriptor =
       opencensus::stats::ViewDescriptor()
-          .set_name(absl::StrCat(kStatsPrefix, "desc/", name))
+          .set_name(absl::StrCat(kStatsPrefix, name))
           .set_measure(absl::StrCat(kStatsPrefix, "measure/", name));
 
   auto agg = GetAggregation(name, desc);
