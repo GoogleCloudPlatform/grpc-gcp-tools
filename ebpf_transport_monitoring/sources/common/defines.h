@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef _DEFINES_H_
-#define _DEFINES_H_
+#ifndef _SOURCES_COMMON_DEFINES_H_
+#define _SOURCES_COMMON_DEFINES_H_
 
 #ifdef CORE
 #include "vmlinux.h"  // NOLINT(build/include)
-#else
-#include <linux/bpf.h>
 #endif
 
 #define TRUE 1
@@ -40,10 +38,8 @@
 
 /*
 Maximum connections traced. The value is an arbitrary limit.
-This value can be made configurable via command line later.
-bpf_map__set_max_entries()
 */
-#define MAX_CONN_TRACED 128
+#define MAX_CONN_TRACED 64
 
 /* In theory this count is 2^32 - 1
   In practice the number of concurrent streams per connection is 100.
@@ -60,4 +56,4 @@ bpf_map__set_max_entries()
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
-#endif  // _DEFINES_H_
+#endif  // _SOURCES_COMMON_DEFINES_H_

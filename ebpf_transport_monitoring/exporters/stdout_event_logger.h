@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef _EXPORTERS_STDOUT_EVENT_LOGGER_H_
-#define _EXPORTERS_STDOUT_EVENT_LOGGER_H_
+#ifndef _EBPF_MONITOR__STDOUT_EVENT_LOGGER_H_
+#define _EBPF_MONITOR__STDOUT_EVENT_LOGGER_H_
 
 #include <string>
 #include <unordered_map>
 
 #include "absl/container/flat_hash_map.h"
-#include "loader/exporter/log_exporter.h"
+#include "ebpf_monitor/exporter/log_exporter.h"
 
-namespace prober {
+namespace ebpf_monitor {
 
 class StdoutEventExporter : public LogExporterInterface {
  public:
@@ -30,8 +30,8 @@ class StdoutEventExporter : public LogExporterInterface {
   absl::Status Init() override { return absl::OkStatus(); }
 
   absl::Status RegisterLog(std::string name, LogDesc& log_desc) override;
-  absl::Status HandleData(std::string log_name, const void* const data,
-                          const uint32_t size) override;
+  absl::Status HandleData(absl::string_view log_name, void* data,
+                          uint32_t size) override;
 
  private:
   absl::flat_hash_map<std::string, bool> logs_;
@@ -39,4 +39,4 @@ class StdoutEventExporter : public LogExporterInterface {
 
 }  // namespace prober
 
-#endif  // _EXPORTERS_STDOUT_EVENT_LOGGER_H_
+#endif  // _EBPF_MONITOR__STDOUT_EVENT_LOGGER_H_

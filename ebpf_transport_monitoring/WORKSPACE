@@ -17,6 +17,16 @@ workspace(name = "lightfoot")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
+http_archive(
+    name = "rules_pkg",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.9.1/rules_pkg-0.9.1.tar.gz",
+        "https://github.com/bazelbuild/rules_pkg/releases/download/0.9.1/rules_pkg-0.9.1.tar.gz",
+    ],
+    sha256 = "8f9ee2dc10c1ae514ee599a8b42ed99fa262b757058f65ad3c384289ff70c4b8",
+)
+load("@rules_pkg//:deps.bzl", "rules_pkg_dependencies")
+rules_pkg_dependencies()
 
 http_archive(
     name = "rules_proto",
@@ -87,6 +97,21 @@ http_archive(
     url = "https://github.com/bazelbuild/rules_foreign_cc/archive/refs/tags/0.9.0.tar.gz",
 )
 
+http_archive(
+    name = "rules_license",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_license/releases/download/0.0.7/rules_license-0.0.7.tar.gz",
+        "https://github.com/bazelbuild/rules_license/releases/download/0.0.7/rules_license-0.0.7.tar.gz",
+    ],
+    sha256 = "4531deccb913639c30e5c7512a054d5d875698daeb75d8cf90f284375fe7c360",
+)
+
+http_archive(
+    name = "com_google_googletest",
+    strip_prefix = "googletest-main",
+    urls = ["https://github.com/google/googletest/archive/main.zip"],
+)
+
 load("@rules_foreign_cc//foreign_cc:repositories.bzl", "rules_foreign_cc_dependencies")
 
 rules_foreign_cc_dependencies()
@@ -95,7 +120,7 @@ http_archive(
     name = "elfutils",
     url = "https://sourceware.org/elfutils/ftp/0.189/elfutils-0.189.tar.bz2",
     strip_prefix = "elfutils-0.189",
-    build_file = "//rules/third_party:BUILD.elf",
+    build_file = "//rules/third_party:BUILD.elf.bzl",
     sha256 = "39bd8f1a338e2b7cd4abc3ff11a0eddc6e690f69578a57478d8179b4148708c8",
 )
 
@@ -103,7 +128,7 @@ git_repository(
     name = "libbpf",
     commit ="dc4e7076ad134559eb1051d353570f74cfd5606d",
     remote = "https://github.com/libbpf/libbpf.git",
-    build_file = "//rules/third_party:BUILD.bpf",
+    build_file = "//rules/third_party:BUILD.bpf.bzl",
 )
 
 http_archive(
@@ -111,22 +136,14 @@ http_archive(
     url = "https://github.com/libevent/libevent/releases/download/release-2.1.12-stable/libevent-2.1.12-stable.tar.gz",
     sha256 = "92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb",
     strip_prefix = "libevent-2.1.12-stable",
-    build_file = "//rules/third_party:BUILD.event",
+    build_file = "//rules/third_party:BUILD.event.bzl",
 )
 
 http_archive(
     name = "zlib",
     url = "https://zlib.net/zlib-1.2.13.tar.gz",
     strip_prefix = "zlib-1.2.13",
-    build_file = "//rules/third_party:BUILD.zlib",
-)
-
-http_archive(
-    name = "spdlog",
-    url = "https://github.com/gabime/spdlog/archive/refs/tags/v1.11.0.tar.gz",
-    strip_prefix = "spdlog-1.11.0",
-    build_file = "//rules/third_party:BUILD.spdlog",
-    sha256 = "ca5cae8d6cac15dae0ec63b21d6ad3530070650f68076f3a4a862ca293a858bb"
+    build_file = "//rules/third_party:BUILD.zlib.bzl",
 )
 
 http_archive(
@@ -134,19 +151,27 @@ http_archive(
     url = "https://sourceforge.net/projects/tclap/files/tclap-1.4.0-rc1.tar.bz2",
     sha256 = "33e18c7828f76a9e5f2a00afe575156520e383693059ca9bc34ff562927e20c6",
     strip_prefix = "tclap-1.4.0-rc1",
-    build_file = "//rules/third_party:BUILD.tclap",
+    build_file = "//rules/third_party:BUILD.tclap.bzl",
 )
 
 http_archive(
     name = "com_github_curl",
-    build_file = "//rules/third_party:BUILD.curl",
+    build_file = "//rules/third_party:BUILD.curl.bzl",
     strip_prefix = "curl-master",
     urls = ["https://github.com/curl/curl/archive/master.zip"],
 )
 
 http_archive(
     name = "com_github_libarchive",
-    build_file = "//rules/third_party:BUILD.libarchive",
+    build_file = "//rules/third_party:BUILD.libarchive.bzl",
     strip_prefix = "libarchive-3.6.2",
     urls = ["https://github.com/libarchive/libarchive/releases/download/v3.6.2/libarchive-3.6.2.tar.gz"],
+)
+
+http_archive(
+    name = "spdlog",
+    url = "https://github.com/gabime/spdlog/archive/refs/tags/v1.11.0.tar.gz",
+    strip_prefix = "spdlog-1.11.0",
+    build_file = "//rules/third_party:BUILD.spdlog.bzl",
+    sha256 = "ca5cae8d6cac15dae0ec63b21d6ad3530070650f68076f3a4a862ca293a858bb"
 )

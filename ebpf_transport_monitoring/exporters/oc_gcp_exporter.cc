@@ -1,11 +1,11 @@
 // Copyright 2023 Google LLC
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,29 +17,24 @@
 #include <cstdio>
 #include <fstream>
 #include <string>
-#include <unordered_map>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/substitute.h"
 #include "absl/time/time.h"
 #include "events.h"
 #include "exporters/exporters_util.h"
 #include "exporters/gce_metadata.h"
 #include "google/monitoring/v3/metric_service.grpc.pb.h"
-#include "grpcpp/grpcpp.h"
 #include "grpcpp/security/credentials.h"
-#include "oc_gcp_exporter.h"
 #include "opencensus/exporters/stats/stackdriver/stackdriver_exporter.h"
 #include "opencensus/stats/stats.h"
 
-#define LOGGING_INTERVAL absl::Minutes(1)
-#define LOGS_PER_REQUEST 199
+constexpr absl::Duration LOGGING_INTERVAL = absl::Minutes(1);
+constexpr uint32_t LOGS_PER_REQUEST = 199;
 
-namespace prober {
+namespace ebpf_monitor {
 
 using ::opencensus::stats::Aggregation;
-using ::opencensus::stats::AggregationWindow;
 using ::opencensus::stats::BucketBoundaries;
 using ::opencensus::stats::MeasureInt64;
 using ::opencensus::stats::ViewDescriptor;
@@ -47,23 +42,23 @@ using ::opencensus::stats::ViewDescriptor;
 const char kStatsPrefix[] = "ebpf_prober/";
 constexpr char kGoogleStackdriverStatsAddress[] = "monitoring.googleapis.com";
 
-static std::string OCDataTypeString(MetricDataType type) {
+std::string OCDataTypeString(MetricDataType type) {
   switch (type) {
-    case MetricDataType::kbytes:
+    case MetricDataType::kBytes:
       return "By";
-    case MetricDataType::kkbytes:
+    case MetricDataType::kKbytes:
       return "kBy";
-    case MetricDataType::kmbytes:
+    case MetricDataType::kMbytes:
       return "MBy";
-    case MetricDataType::kgbytes:
+    case MetricDataType::kGbytes:
       return "GBy";
-    case MetricDataType::kbits:
+    case MetricDataType::kBits:
       return "bit";
-    case MetricDataType::kkbits:
+    case MetricDataType::kKbits:
       return "kbit";
-    case MetricDataType::kmbits:
+    case MetricDataType::kMbits:
       return "Mbits";
-    case MetricDataType::kgbits:
+    case MetricDataType::kGbits:
       return "Gbits";
   }
   return "";
@@ -103,10 +98,10 @@ std::unique_ptr<google::monitoring::v3::MetricService::StubInterface>
 OCGCPMetricExporter::MakeMetricServiceStub(std::string& json_text) {
   grpc::ChannelArguments args;
   args.SetUserAgentPrefix("stackdriver_exporter");
-  // The credential file path is configured by environment variable
-  // GOOGLE_APPLICATION_CREDENTIALS
   std::shared_ptr<::grpc::ChannelCredentials> credential;
   if (service_file_path_.empty()) {
+    // The credential file path is configured by environment variable
+    // GOOGLE_APPLICATION_CREDENTIALS
     credential = ::grpc::GoogleDefaultCredentials();
   } else {
     auto jwt_creds = ::grpc::ServiceAccountJWTAccessCredentials(json_text);
@@ -120,7 +115,6 @@ OCGCPMetricExporter::MakeMetricServiceStub(std::string& json_text) {
 
 absl::Status OCGCPMetricExporter::Init() {
   GetTags();
-
   std::string json_text;
   if (!service_file_path_.empty()) {
     auto creds = std::ifstream(service_file_path_);
@@ -131,10 +125,7 @@ absl::Status OCGCPMetricExporter::Init() {
   }
   opencensus::exporters::stats::StackdriverOptions stats_opts;
   stats_opts.project_id = project_;
-  // We add a lot of detail already. Don't need to add more cardinality.
-  stats_opts.opencensus_task = "ebpf_prober";
   stats_opts.metric_service_stub = MakeMetricServiceStub(json_text);
-
   opencensus::exporters::stats::StackdriverExporter::Register(
       std::move(stats_opts));
 
@@ -144,8 +135,8 @@ absl::Status OCGCPMetricExporter::Init() {
 static std::string OCGetUnitString(MetricUnit_t unit) {
   switch (unit.type) {
     case MetricUnitType::kTime:
-      // we always convert to miliseconds
-      return TimeTypeString(MetricTimeType::kmsec);
+      // we always convert to milli seconds
+      return TimeTypeString(MetricTimeType::kMsec);
     case MetricUnitType::kData:
       return OCDataTypeString(unit.data);
     case MetricUnitType::kNone:
@@ -170,7 +161,7 @@ void OCGCPMetricExporter::GetTags() {
   }
 
   if (!gce_metadata_.empty()) {
-    for (auto it : gce_metadata_) {
+    for (const auto& it : gce_metadata_) {
       auto tag = opencensus::tags::TagKey::Register(it.first);
       default_tag_vector_.push_back(std::make_pair(tag, it.second));
     }
@@ -181,7 +172,8 @@ void OCGCPMetricExporter::GetTags() {
     default_tag_vector_.push_back(std::make_pair(tag, hostname));
   }
 
-  default_tag_map_ = new opencensus::tags::TagMap(default_tag_vector_);
+  default_tag_map_ =
+      std::make_unique<opencensus::tags::TagMap>(default_tag_vector_);
 }
 
 absl::StatusOr<opencensus::stats::Aggregation> GetAggregation(
@@ -189,25 +181,19 @@ absl::StatusOr<opencensus::stats::Aggregation> GetAggregation(
   switch (desc.kind) {
     case MetricKind::kGauge:
       return Aggregation::LastValue();
-
     case MetricKind::kDelta:
       return Aggregation::Sum();
-
     case MetricKind::kCumulative:
       return Aggregation::Sum();
-
     case MetricKind::kDistribution:
       switch (desc.unit.type) {
         case MetricUnitType::kTime:
-          return prober::TimeDistributionAggregation();
-
+          return ebpf_monitor::TimeDistributionAggregation();
         case MetricUnitType::kData:
-          return prober::DataDistributionAggregation();
-
+          return ebpf_monitor::DataDistributionAggregation();
         case MetricUnitType::kNone:
-          return prober::CountDistributionAggregation();
+          return ebpf_monitor::CountDistributionAggregation();
       }
-
     default:
       break;
   }
@@ -219,39 +205,33 @@ absl::Status OCGCPMetricExporter::RegisterMetric(std::string name,
   if (measures_.find(name) != measures_.end()) {
     return absl::AlreadyExistsError("metric already registered");
   }
-
   if (correlator_ == nullptr) {
     return absl::InternalError(
-        "Correlator needs to be registerd before metrics");
+        "Correlator needs to be registered before metrics");
   }
-
   if (desc.kind == MetricKind::kNone) {
     return absl::InternalError("Invalid Metric Kind");
   }
-
   metrics_[name] = desc;
-
   GetMesure(name, desc);
-  auto descriptor =
-      opencensus::stats::ViewDescriptor()
+  auto descriptor = ViewDescriptor()
           .set_name(absl::StrCat(kStatsPrefix, name))
+          .set_description("The length of the lines read in")
           .set_measure(absl::StrCat(kStatsPrefix, "measure/", name));
 
   auto agg = GetAggregation(name, desc);
   if (!agg.ok()) {
     return agg.status();
   }
-
   descriptor.set_aggregation(*agg);
-  descriptor.set_expiry_duration(absl::Seconds(120));
+  descriptor.set_expiry_duration(absl::Seconds(300));
 
   for (auto& tag : default_tag_vector_) {
     descriptor.add_column(tag.first);
   }
-
   if (agg_ == AggregationLevel::kConnection) {
     auto labels = correlator_->GetLabelKeys();
-    for (auto it : labels) {
+    for (const auto& it : labels) {
       descriptor.add_column(opencensus::tags::TagKey::Register(it));
     }
     descriptor.add_column(opencensus::tags::TagKey::Register("local_ip"));
@@ -261,7 +241,8 @@ absl::Status OCGCPMetricExporter::RegisterMetric(std::string name,
   return absl::OkStatus();
 }
 
-opencensus::tags::TagMap& OCGCPMetricExporter::GetTagMap(const std::string& uuid) {
+opencensus::tags::TagMap&
+  OCGCPMetricExporter::GetTagMap(const std::string& uuid) {
   if (agg_ == AggregationLevel::kConnection) {
     auto it = tag_maps_.find(uuid);
     if (it != tag_maps_.end()) {
@@ -269,20 +250,18 @@ opencensus::tags::TagMap& OCGCPMetricExporter::GetTagMap(const std::string& uuid
     }
 
     auto tag_vector = default_tag_vector_;
-
     size_t pos = uuid.find("->");
-
     std::string local_ip = uuid.substr(0, pos);
     std::string remote_ip = uuid.substr(pos+2);
-
     tag_vector.push_back(
-        std::make_pair(opencensus::tags::TagKey::Register("local_ip"), local_ip));
+        std::make_pair(opencensus::tags::TagKey::Register("local_ip"),
+                       local_ip));
     tag_vector.push_back(
-        std::make_pair(opencensus::tags::TagKey::Register("remote_ip"), remote_ip));
-
+        std::make_pair(opencensus::tags::TagKey::Register("remote_ip"),
+                       remote_ip));
     auto labels = correlator_->GetLabels(uuid);
 
-    for (auto label : labels) {
+    for (const auto& label : labels) {
       tag_vector.push_back(std::make_pair(
           opencensus::tags::TagKey::Register(label.first), label.second));
     }
@@ -295,68 +274,60 @@ opencensus::tags::TagMap& OCGCPMetricExporter::GetTagMap(const std::string& uuid
 
 static uint64_t GetMs(uint64_t val, MetricTimeType type) {
   switch (type) {
-    case MetricTimeType::knsec:
+    case MetricTimeType::kNsec:
       return val / 1000000;
-    case MetricTimeType::kusec:
+    case MetricTimeType::kUsec:
       return val / 1000;
-    case MetricTimeType::kmsec:
+    case MetricTimeType::kMsec:
       return val;
-    case MetricTimeType::ksec:
+    case MetricTimeType::kSec:
       return val * 1000;
-    case MetricTimeType::kmin:
+    case MetricTimeType::kMin:
       return val * 60 * 000;
-    case MetricTimeType::khour:
+    case MetricTimeType::kHour:
       return val * 3600 * 1000;
   }
   // This will not happen;
+  static_assert(true);
   return 0;
 }
 
-absl::Status OCGCPMetricExporter::HandleData(std::string metric_name, void* key,
+absl::Status OCGCPMetricExporter::HandleData(absl::string_view metric_name,
+                                             void* key,
                                              void* value) {
   auto it = metrics_.find(metric_name);
   if (it == metrics_.end()) {
     return absl::NotFoundError("metric_name not found");
   }
-
   metric_format_t* metric = (metric_format_t*)value;
   auto metric_desc = metrics_.find(metric_name);
-
   auto uuid = correlator_->GetUUID(*(uint64_t*)key);
   if (!uuid.ok()) {
     return absl::OkStatus();
   }
-
   // This line also checks if a metric was just read.
   auto old_timestamp =
       last_read_.CheckMetricTime(metric_name, *uuid, metric->timestamp);
   if (!old_timestamp.ok()) {
     return absl::OkStatus();
   }
-
   auto ms_it = measures_.find(metric_name);
   if (ms_it == measures_.end()) {
     return absl::NotFoundError("metric measure not found");
   }
-
   absl::StatusOr<uint64_t> val =
-      ExportersUtil::GetMetric(&(metric->data), metric_desc->second.value_type);
+      GetMetric(&(metric->data), metric_desc->second.value_type);
   if (!val.ok()) {
     return val.status();
   }
-
   if (metric_desc->second.unit.type == MetricUnitType::kTime) {
     *val = GetMs(*val, metric_desc->second.unit.time);
   }
-
   if (metric_desc->second.kind == MetricKind::kCumulative) {
-    *val = *val - data_memeory_.StoreAndGetValue(metric_name, *uuid, *val);
+    *val = *val - data_memory_.StoreAndGetValue(metric_name, *uuid, *val);
   }
-
   auto tagMap = GetTagMap(*uuid);
-
   opencensus::stats::Record({{ms_it->second, *val}}, tagMap);
-
   return absl::OkStatus();
 }
 
@@ -373,20 +344,20 @@ absl::Status OCGCPMetricExporter::CustomLabels(
     default_tag_vector_.push_back(std::make_pair(tag, label.second));
   }
 
-  free(default_tag_map_);
-  default_tag_map_ = new opencensus::tags::TagMap(default_tag_vector_);
+  default_tag_map_ =
+      std::make_unique<opencensus::tags::TagMap>(default_tag_vector_);
   return absl::OkStatus();
 }
 
 void OCGCPMetricExporter::Cleanup() {
   auto uuids = last_read_.GetUUID();
-  for (auto uuid : uuids) {
+  for (const auto& uuid : uuids) {
     if (!correlator_->CheckUUID(uuid)) {
       last_read_.DeleteValue(uuid);
-      data_memeory_.DeleteValue(uuid);
+      data_memory_.DeleteValue(uuid);
       tag_maps_.erase(uuid);
     }
   }
 }
 
-}  // namespace prober
+}  // namespace ebpf_monitor

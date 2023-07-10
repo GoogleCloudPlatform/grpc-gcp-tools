@@ -16,16 +16,15 @@
 #define _EXPORTERS_OC_GCP_EXPORTER_H_
 #include <memory>
 #include <string>
-#include <unordered_map>
 
-#include "absl/status/statusor.h"
-#include "absl/time/time.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "exporters/exporters_util.h"
 #include "google/monitoring/v3/metric_service.grpc.pb.h"
-#include "loader/exporter/metric_exporter.h"
+#include "ebpf_monitor/exporter/metric_exporter.h"
 #include "opencensus/stats/stats.h"
 
-namespace prober {
+namespace ebpf_monitor {
 
 enum class AggregationLevel { kHost, kConnection };
 
@@ -42,7 +41,7 @@ class OCGCPMetricExporter : public MetricExporterInterface {
       const absl::flat_hash_map<std::string, std::string>& labels);
   absl::Status RegisterMetric(std::string name,
                               const MetricDesc& desc) override;
-  absl::Status HandleData(std::string metric_name, void* key,
+  absl::Status HandleData(absl::string_view metric_name, void* key,
                           void* value) override;
   void Cleanup();
 
@@ -62,11 +61,11 @@ class OCGCPMetricExporter : public MetricExporterInterface {
   absl::flat_hash_map<std::string, opencensus::tags::TagMap*> tag_maps_;
   std::vector<std::pair<opencensus::tags::TagKey, std::string>>
       default_tag_vector_;
-  opencensus::tags::TagMap* default_tag_map_;
+  std::unique_ptr<opencensus::tags::TagMap> default_tag_map_;
   absl::flat_hash_map<std::string, MetricDesc> metrics_;
-  MetricDataMemory data_memeory_;
+  MetricDataMemory data_memory_;
 };
 
-}  // namespace prober
+}  // namespace ebpf_monitor
 
 #endif  // _EXPORTERS_FILE_EXPORTER_H_

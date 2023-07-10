@@ -1,4 +1,5 @@
 load("//rules:bpf.bzl", "bpf_program")
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -8,6 +9,11 @@ cc_library(
         "missing_defs.h",
         "struct_flavors.h",
     ],
+)
+
+cc_library(
+    name = "vmlinux",
+    hdrs = ["vmlinux.h"],
 )
 
 cc_library(
@@ -24,6 +30,13 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "sym_helpers",
+    hdrs = [
+        "sym_helpers.h",
+    ],
+)
+
 bpf_program(
     name = "tcp_bpf_core",
     src = "tcp_bpf.c",
@@ -31,15 +44,14 @@ bpf_program(
     deps = [
         ":maps",
         ":missing_headers",
+        ":vmlinux",
         "//:events",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
-        "//sources/common:vmlinux",
         "@libbpf",
     ],
 )
-
 
 bpf_program(
     name = "tcp_bpf",
@@ -48,10 +60,10 @@ bpf_program(
     deps = [
         ":maps",
         "//:events",
+        "//external/include:stdarg",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
-        "//third_party/include:stdarg",
         "@libbpf",
     ],
 )
@@ -62,11 +74,11 @@ bpf_program(
     core = True,
     deps = [
         ":missing_headers",
+        ":vmlinux",
         "//:events",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
-        "//sources/common:vmlinux",
         "@libbpf",
     ],
 )
@@ -77,10 +89,10 @@ bpf_program(
     core = False,
     deps = [
         "//:events",
+        "//external/include:stdarg",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
-        "//third_party/include:stdarg",
         "@libbpf",
     ],
 )
@@ -91,13 +103,14 @@ bpf_program(
     core = True,
     deps = [
         ":maps",
-        ":parse_h2_frame",
         ":missing_headers",
+        ":parse_h2_frame",
+        ":sym_helpers",
+        ":vmlinux",
         "//:events",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
-        "//sources/common:vmlinux",
         "@libbpf",
     ],
 )
@@ -107,13 +120,14 @@ bpf_program(
     src = "h2_bpf.c",
     core = False,
     deps = [
-       ":maps",
-       ":parse_h2_frame",
+        ":maps",
+        ":parse_h2_frame",
+        ":sym_helpers",
         "//:events",
+        "//external/include:stdarg",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
-        "//third_party/include:stdarg",
         "@libbpf",
     ],
 )
@@ -124,11 +138,11 @@ bpf_program(
     core = True,
     deps = [
         ":maps",
+        ":vmlinux",
         "//:events",
-        "//sources/common:vmlinux",
+        "//external/include:stdarg",
         "//sources/common:defines",
         "@libbpf",
-        "//third_party/include:stdarg",
     ],
 )
 
@@ -138,10 +152,35 @@ bpf_program(
     core = False,
     deps = [
         ":maps",
+        ":vmlinux",
         "//:events",
-        "//sources/common:vmlinux",
+        "//external/include:stdarg",
         "//sources/common:defines",
         "@libbpf",
-        "//third_party/include:stdarg",
     ],
+)
+
+pkg_tar(
+    name = "sources_tar",
+    srcs = [
+        ":h2_bpf_core",
+        ":maps_core",
+        ":tcp_bpf_core",
+        ":tcp_bpf_kprobe_core",
+    ],
+    extension = "tar.gz",
+)
+
+cc_library(
+    name = "sources",
+    srcs = [":sources_obj"],
+    linkstatic = True,
+    alwayslink = True,
+)
+
+genrule(
+    name = "sources_obj",
+    srcs = [":sources_tar"],
+    outs = ["sources.o"],
+    cmd = "cp $(locations :sources_tar) sources.tar.gz && ld -r -b binary sources.tar.gz -m elf_x86_64 -o $@ && rm ./sources.tar.gz",
 )

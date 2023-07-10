@@ -17,6 +17,10 @@
 
 #define CORRELATOR_IP_MAX 128
 
+#ifdef __cplusplus
+#include <stdint.h>
+#endif
+
 typedef struct {
   uint8_t laddr[CORRELATOR_IP_MAX];
   uint8_t raddr[CORRELATOR_IP_MAX];

@@ -20,7 +20,7 @@
 
 typedef const h2_cfg_t config_type_t;
 
-/* h2_grpc_pid_filter is a map of pids that the probe is supposed to trace */ 
+/* h2_grpc_pid_filter is a map of pids that the probe is supposed to trace */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(key_size, sizeof(__u32));
@@ -35,7 +35,7 @@ struct {
   __uint(max_entries, MAX_PID_TRACED);
 } h2_cfg SEC(".maps");
 
-/* h2_grpc_correlation is the buffer that is used to communicate events with 
+/* h2_grpc_correlation is the buffer that is used to communicate events with
 userspace for correlation related information.*/
 struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
@@ -112,7 +112,7 @@ static __always_inline int get_tcp_tuple_from_h2_conn(void * ctx,
 
   REQUIRE_MEM_VAR(configuration->offset.tcp_ip,ip);
   REQUIRE_MEM_VAR(configuration->offset.tcp_port,port);
-  
+
   long success = READ_MEMBER(h2_conn, laddr, &g_laddr);
   if (success < 0 || g_laddr.ptr == NULL) {
     return 0;
@@ -139,11 +139,14 @@ static __always_inline int get_tcp_tuple_from_h2_conn(void * ctx,
   if (unlikely(cip == NULL)){
     return 0;
   }
-  
+
   __builtin_memset(cip, 0, sizeof(correlator_ip_t));
   cip->conn_id = (uint64_t) h2_conn;
   cip->lport = port;
 
+  /* Due to compiler optimizations the bpf verifier rejects the program.
+  The addition of asm volatile makes sure that the code is not optimized by the
+  compiler.*/
   size_t length = ip.len;
   size_t length_minus_1 = length - 1;
   asm volatile("" : "+r"(length_minus_1) :);
@@ -229,16 +232,14 @@ static __always_inline int send_h2_start(void * ctx,
 static __always_inline int send_h2_go_away (void * ctx,
 	                                   config_type_t * configuration,
                                      ec_ebpf_events_t * event,
-                                     void * frame_ptr){             
+                                     void * frame_ptr){
   ec_h2_go_away_t * data = (ec_h2_go_away_t*)event->event_info;
   REQUIRE_MEM_VAR(configuration->offset.goawayframe_stream,data->last_stream_id);
   READ_MEMBER(frame_ptr, configuration->offset.goawayframe_stream,
               &data->last_stream_id);
-                                    
   REQUIRE_MEM_VAR(configuration->offset.goawayframe_error,data->error_code);
   READ_MEMBER(frame_ptr, configuration->offset.goawayframe_error,
               &data->error_code);
-                                  
   event->mdata.event_type = EC_H2_EVENT_GO_AWAY;
   event->mdata.length = sizeof(ec_h2_go_away_t);
 
@@ -272,7 +273,8 @@ static __always_inline int send_h2_settings (void * ctx,
     if (unlikely(data_length > sizeof(ec_ebpf_events_t))){
       data_length = sizeof(ec_ebpf_events_t);
     }
-    bpf_perf_event_output(ctx, &h2_grpc_events, BPF_F_CURRENT_CPU, event, data_length);   
+    bpf_perf_event_output(ctx, &h2_grpc_events, BPF_F_CURRENT_CPU,
+                          event, data_length);
   }
   return 0;
 }
@@ -325,7 +327,7 @@ static __always_inline int collect_data(__u8 client, struct pt_regs* ctx) {
   if (value == NULL){
     send_h2_start(ctx, configuration, event, conn_ptr, client);
   } else {
-    uint64_t timestamp = event->mdata.timestamp;    
+    uint64_t timestamp = event->mdata.timestamp;
     *value = timestamp;
   }
   uint8_t type;
@@ -342,7 +344,7 @@ static __always_inline int collect_data(__u8 client, struct pt_regs* ctx) {
                         &stream_id);
   if (unlikely(success < 0)){
     return -1;
-  }          
+  }
 
   switch(type) {
     case H2_RST_STREAM: {
@@ -362,7 +364,6 @@ static __always_inline int collect_data(__u8 client, struct pt_regs* ctx) {
     case H2_PING:
       //send_h2_ping(ctx,configuration,event,frame_ptr);
       return 0;
-    
     case H2_GOAWAY:
       send_h2_go_away(ctx,configuration,event,frame_ptr);
       return 0;
@@ -488,7 +489,6 @@ static int __always_inline process_frame(struct pt_regs* ctx) {
   if (unlikely(regs == NULL)) {
     return 0;
   }
-  
   void * buf_writer = 0;
   long success = 0;
   success = read_variable(&buf_writer, sizeof(buf_writer),
@@ -503,11 +503,9 @@ static int __always_inline process_frame(struct pt_regs* ctx) {
   if (unlikely(success < 0)) {
     return success;
   }
-  
   if (len <= 0) {
     return 0;
   }
-  
   char* buf_ptr = 0;
   success = read_variable(&buf_ptr , sizeof(buf_ptr),
                 &configuration->variables.write_buffer_ptr, sp, regs);
@@ -515,7 +513,7 @@ static int __always_inline process_frame(struct pt_regs* ctx) {
     return success;
   }
   // What do you do if you don't have connection pointer corresponding to 
-  // h2 connection. This should ideally only happen if client has not recieved any
+  // h2 connection. This should ideally only happen if client has not received any
   // message from this connection. Settings frame could be missed in this case.
 
   struct h2_conn_info * h2_connection = bpf_map_lookup_elem(&buff_writer_to_h2_conn, &buf_writer);
@@ -525,15 +523,13 @@ static int __always_inline process_frame(struct pt_regs* ctx) {
   } else {
     event->mdata.connection_id = h2_connection->conn_id;
   }
-  
   return parse_h2_frame(ctx, buf_ptr, len, event, h2_connection->client);
-  
 }
 
 /*
 All these functions have the similar function signature.
-Hence we can use the same function to process the information. The type of frame 
-can be figured out from the frame itself.
+Hence we can use the same function to process the information.
+The type of frame can be figured out from the frame itself.
 */
 SEC("uprobe/h2_server_probe")
 int probe_handle_server_data(struct pt_regs* ctx) {
@@ -556,8 +552,9 @@ int probe_handle_client_header(struct pt_regs* ctx) {
   return collect_header_data(TRUE,ctx);
 }
 
-/* Note it is possible that we cannot find a corresponding h2 connection id for a 
-bufwriter for a few frames on client side this is accepted. Will fix it in the next revision
+/* Note it is possible that we cannot find a corresponding h2 connection id for
+a bufwriter for a few frames on client side this is accepted.
+Will fix it in the next revision.
 */
 SEC("uprobe/h2_bufwriter_probe")
 int probe_sent_frame(struct pt_regs* ctx) {
@@ -604,12 +601,11 @@ int probe_close(struct pt_regs* ctx){
     return 0;
   }
   bpf_map_delete_elem(&h2_connection, &conn_ptr);
-  
+
   event->mdata.length = 0;
   event->mdata.event_type = EC_H2_EVENT_CLOSE;
   bpf_perf_event_output(ctx, &h2_grpc_events, BPF_F_CURRENT_CPU, event,
                               sizeof(ec_ebpf_event_metadata_t));
-  
   return 0;
 }
 char LICENSE[] SEC("license") = "GPL";

@@ -1,21 +1,25 @@
 // Copyright 2023 Google LLC
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef _H2_SYMADDRS_H_
-#define _H2_SYMADDRS_H_
+#ifndef _SOURCES_COMMON_H2_SYMADDRS_H_
+#define _SOURCES_COMMON_H2_SYMADDRS_H_
 
-#include "loader/source/sym_addrs.h"  // NOLINT(build/include)
+#ifdef __cplusplus
+#include "ebpf_monitor/utils/sym_addrs.h"
+#else
+#include "sym_addrs.h"  // NOLINT(build/include)
+#endif
 
 typedef struct grpc_http2_loc__ {
   sym_location_t connection;
@@ -112,4 +116,4 @@ typedef enum {
 } frame_type;
 
 #define H2_END_STREAM 0x01
-#endif  // _H2_SYMADDRS_H_
+#endif  // _SOURCES_COMMON_H2_SYMADDRS_H_

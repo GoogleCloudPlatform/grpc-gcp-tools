@@ -22,7 +22,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 
-namespace prober {
+namespace ebpf_monitor {
 
 class GCEMetadata {
  public:

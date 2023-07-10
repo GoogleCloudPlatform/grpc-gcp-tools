@@ -1,11 +1,11 @@
 # Copyright 2023 Google LLC
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,6 +15,14 @@
 """The build rules for eBPF programs and skeleton headers."""
 
 def get_basename(path):
+    """This function gets the name of the file
+
+    Args:
+        path: path of file of which we need to extract file name
+
+    Returns:
+        The stripped file name.
+    """
     if not path[-2:] == ".h":
         return path
     loc = path.rfind("/")
@@ -24,6 +32,14 @@ def get_basename(path):
         return path[:loc]
 
 def get_include_files(ctx):
+    """This function goes through the dependencies and return a list of paths to be imported
+
+    Args:
+        ctx: bazel ctx as passed by the rule
+
+    Returns:
+        List of paths and files to be included
+    """
     files = []
     include_paths = []
     for dep in ctx.attr.deps:

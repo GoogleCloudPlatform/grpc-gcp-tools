@@ -1,11 +1,11 @@
 // Copyright 2023 Google LLC
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,14 +17,13 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
-#include <unordered_map>
-#include <utility>
 
 #include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "events.h"
 #include "exporters/exporters_util.h"
 
-namespace prober {
+namespace ebpf_monitor {
 
 absl::Status StdoutMetricExporter::RegisterMetric(std::string name,
                                                   const MetricDesc& desc) {
@@ -35,7 +34,7 @@ absl::Status StdoutMetricExporter::RegisterMetric(std::string name,
   return absl::OkStatus();
 }
 
-absl::Status StdoutMetricExporter::HandleData(std::string metric_name,
+absl::Status StdoutMetricExporter::HandleData(absl::string_view metric_name,
                                               void* key, void* value) {
   auto it = metrics_.find(metric_name);
   if (it == metrics_.end()) {
@@ -46,6 +45,9 @@ absl::Status StdoutMetricExporter::HandleData(std::string metric_name,
 
   auto uuid = correlator_->GetUUID(*(uint64_t*)key);
 
+  // In case the uuid is not found it either means that this is an old
+  // connection that is not cleaned up or it is a connection we don't trace.
+  // This is not an error condition.
   if (!uuid.ok()) {
     return absl::OkStatus();
   }
@@ -54,7 +56,7 @@ absl::Status StdoutMetricExporter::HandleData(std::string metric_name,
     return absl::OkStatus();
   }
 
-  auto metric_str = ExportersUtil::GetMetricString(
+  auto metric_str = GetMetricString(
       metric_name, *uuid, it->second, key, &(metric->data));
   if (!metric_str.ok()) {
     return metric_str.status();
@@ -65,11 +67,11 @@ absl::Status StdoutMetricExporter::HandleData(std::string metric_name,
 
 void StdoutMetricExporter::Cleanup() {
   auto uuids = last_read_.GetUUID();
-  for (auto uuid : uuids) {
+  for (const auto& uuid : uuids) {
     if (!correlator_->CheckUUID(uuid)) {
       last_read_.DeleteValue(uuid);
     }
   }
 }
 
-}  // namespace prober
+}  // namespace ebpf_monitor
