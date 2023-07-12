@@ -16,7 +16,7 @@ You can grant Spanner Admin role to the prober to create instance, database, tab
    ```
 1. Build image:
    ```
-   docker build -f ./ebpf_spanner_prober/Dockerfile -t ebpf-spanner-prober:v0.2.1 .
+   docker build -f ./ebpf_spanner_prober/Dockerfile -t ebpf-spanner-prober:v0.3.1 .
    ```
 1. Run prober:
    ```
