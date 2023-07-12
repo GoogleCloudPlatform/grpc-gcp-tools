@@ -15,9 +15,6 @@ WORKDIR /app/build/ebpf_transport_monitoring
 
 COPY ebpf_transport_monitoring /app/build/ebpf_transport_monitoring
 
-RUN bazel build sources/bpf_sources:h2_bpf_core
-RUN bazel build sources/bpf_sources:tcp_bpf_core
-RUN bazel build sources/bpf_sources:maps_core
 RUN bazel build :lightfoot
 
 # Build spanner_prober
@@ -33,9 +30,6 @@ FROM debian:bullseye
 RUN apt update && apt upgrade -y && apt -y install curl libc6 elfutils
 
 WORKDIR /home/app
-COPY --from=0 /app/build/ebpf_transport_monitoring/bazel-bin/sources/bpf_sources/h2_bpf_core.o ./
-COPY --from=0 /app/build/ebpf_transport_monitoring/bazel-bin/sources/bpf_sources/maps_core.o ./
-COPY --from=0 /app/build/ebpf_transport_monitoring/bazel-bin/sources/bpf_sources/tcp_bpf_core.o ./
 COPY --from=0 /app/build/ebpf_transport_monitoring/bazel-out/k8-fastbuild/bin/lightfoot ./
 COPY --from=1 /go/src/github.com/GoogleCloudPlatform/grpc-gcp-go/spanner_prober/spanner_prober ./
 
