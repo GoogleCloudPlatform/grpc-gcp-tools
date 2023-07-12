@@ -20,7 +20,7 @@ You can grant Spanner Admin role to the prober to create instance, database, tab
    ```
 1. Run prober:
    ```
-   docker run --rm --pid=host --privileged -v <path_to_credentials>.json:/home/app/gcp-creds.json --env GOOGLE_APPLICATION_CREDENTIALS=/home/app/gcp-creds.json ebpf-spanner-prober:v0.2.1 spanner_prober_args="--project=<project-name> --instance=test1 --database=test1 --qps=1 --probe_type=strong_query" lightfoot_args="-o -p <project-name>"
+   docker run --rm --pid=host --privileged -v <path_to_credentials>.json:/home/app/gcp-creds.json --env GOOGLE_APPLICATION_CREDENTIALS=/home/app/gcp-creds.json ebpf-spanner-prober:v0.3.1 spanner_prober_args="--project=<project-name> --instance=test1 --database=test1 --qps=1 --probe_type=strong_query" lightfoot_args="-o -p <project-name>"
    ```
 
 The prober will try to create the instance, database, and the table if any of them doesn't exist.
