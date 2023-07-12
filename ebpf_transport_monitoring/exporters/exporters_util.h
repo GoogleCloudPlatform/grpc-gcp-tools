@@ -12,49 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef _EXPORTERS_EXPORTERS_UTIL_H_
-#define _EXPORTERS_EXPORTERS_UTIL_H_
+#ifndef _EBPF_MONITOR_UTIL_H_
+#define _EBPF_MONITOR_UTIL_H_
 
 #include <cstdint>
 #include <string>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
-#include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "loader/exporter/data_types.h"
+#include "absl/strings/string_view.h"
+#include "ebpf_monitor/exporter/data_types.h"
 
-namespace prober {
+namespace ebpf_monitor {
 
-class ExportersUtil {
- public:
-  static absl::StatusOr<std::string> GetLogString(std::string& log_name,
-                                                  std::string uuid,
-                                                  const void* const data);
-  static uint64_t GetLogConnId(std::string& log_name, const void* const data);
-  static absl::StatusOr<std::string> GetMetricString(std::string name,
-                                                     std::string uuid,
-                                                     const MetricDesc& desc,
-                                                     const void* const key,
-                                                     const void* const value);
-  static absl::Time GetLogTime(std::string& log_name, const void* const data);
-  static absl::Time GetTimeFromBPFns(uint64_t timestamp);
-  static int64_t GetMetric(const void* const data, MetricType type);
-};
+absl::StatusOr<std::string> GetLogString(absl::string_view log_name,
+                                                absl::string_view uuid,
+                                                const void* const data);
+uint64_t GetLogConnId(absl::string_view log_name,
+                              const void* const data);
+absl::StatusOr<std::string> GetMetricString(absl::string_view name,
+                                                    absl::string_view uuid,
+                                                    const MetricDesc& desc,
+                                                    const void* const key,
+                                                    const void* const value);
+absl::Time GetLogTime(absl::string_view log_name,
+                              const void* const data);
+absl::Time GetTimeFromBPFns(uint64_t timestamp);
+int64_t GetMetric(const void* const data, MetricType type);
+
 
 class MetricTimeChecker {
  public:
   MetricTimeChecker() = default;
   // The Checker returns the last metric timestamp or error
-  absl::StatusOr<uint64_t> CheckMetricTime(std::string& metric_name,
-                                           std::string uuid,
+  absl::StatusOr<uint64_t> CheckMetricTime(absl::string_view metric_name,
+                                           absl::string_view uuid,
                                            uint64_t timestamp);
-  absl::StatusOr<uint64_t> GetMetricStartTime(std::string& metric_name,
-                                              std::string uuid);
-  absl::StatusOr<uint64_t> GetMetricTime(std::string& metric_name,
-                                         std::string uuid);
+  absl::StatusOr<uint64_t> GetMetricStartTime(absl::string_view metric_name,
+                                              absl::string_view uuid);
+  absl::StatusOr<uint64_t> GetMetricTime(absl::string_view metric_name,
+                                         absl::string_view uuid);
   absl::flat_hash_set<std::string> GetUUID();
-  void DeleteValue(std::string uuid);
+  void DeleteValue(absl::string_view uuid);
 
  private:
   absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, uint64_t> >
@@ -68,10 +68,11 @@ class MetricDataMemory {
  public:
   MetricDataMemory() = default;
   // The Checker returns the last metric timestamp or error
-  uint64_t StoreAndGetValue(std::string& metric_name, std::string uuid,
+  uint64_t StoreAndGetValue(absl::string_view metric_name,
+                            absl::string_view uuid,
                             uint64_t data);
   absl::flat_hash_set<std::string> GetUUID();
-  void DeleteValue(std::string uuid);
+  void DeleteValue(absl::string_view uuid);
 
  private:
   absl::flat_hash_map<std::string, absl::flat_hash_map<std::string, uint64_t> >
@@ -79,6 +80,6 @@ class MetricDataMemory {
   absl::flat_hash_set<std::string> uuids_;
 };
 
-}  // namespace prober
+}  // namespace ebpf_monitor
 
-#endif  // _EXPORTERS_EXPORTERS_UTIL_H_
+#endif  // _EBPF_MONITOR_UTIL_H_

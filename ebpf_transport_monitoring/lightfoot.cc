@@ -1,130 +1,109 @@
 // Copyright 2023 Google LLC
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <event2/event.h>
-#include <tclap/CmdLine.h>
-
+#include <unistd.h>
+#include <string>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <ostream>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/flags/flag.h"
+#include "absl/flags/parse.h"
+#include "absl/status/status.h"
+#include "absl/strings/numbers.h"
 #include "correlators/h2_go_correlator.h"
 #include "data_manager.h"
+#include "ebpf_monitor/correlator/correlator.h"
+#include "ebpf_monitor/exporter/log_exporter.h"
+#include "ebpf_monitor/exporter/metric_exporter.h"
+#include "ebpf_monitor/source/source.h"
 #include "exporters/file_exporter.h"
 #include "exporters/gcp_exporter.h"
 #include "exporters/oc_gcp_exporter.h"
 #include "exporters/stdout_event_logger.h"
 #include "exporters/stdout_metric_exporter.h"
-#include "loader/correlator/correlator.h"
-#include "loader/exporter/log_exporter.h"
-#include "loader/exporter/metric_exporter.h"
-#include "loader/source/data_source.h"
 #include "sources/source_manager/h2_go_grpc_source.h"
 #include "sources/source_manager/tcp_source.h"
 #include "sources/source_manager/map_source.h"
 
-#include "absl/status/status.h"
+#include "event2/event.h"
+
+ABSL_FLAG(bool, dry_run, false, "Run without loading eBPF code");
+ABSL_FLAG(bool, file_log, false, "Log to file");
+ABSL_FLAG(bool, host_agg, false, "Aggregate at host level");
+ABSL_FLAG(bool, opencensus_log, false,
+          "Use opencensus to export.");
+ABSL_FLAG(std::string, gcp_creds, "", "service acoount credentials");
+ABSL_FLAG(std::string, gcp_project, "", "gcp project id");
+ABSL_FLAG(std::vector<std::string>, custom_labels, std::vector<std::string>(),
+          "Labels to attach to opencensus metrics <key>:<value>");
+
+void check_eof(int, short, void *arg) { // NOLINT
+  struct event_base *base = static_cast<struct event_base *>(arg);
+  char data;
+  int size_read = read(0, &data, 1);
+  if (size_read == 0) {  // EOF
+    event_base_loopexit(base, nullptr);
+  }
+}
 
 int main(int argc, char **argv) {
-  prober::TcpSource tcp_source;
   struct event_base *base = event_base_new();
-  prober::DataManager data_manager(base);
-  prober::LogExporterInterface *logger;
-  prober::MetricExporterInterface *metric_exporter;
-  prober::H2GoCorrelator correlator;
+  ebpf_monitor::DataManager data_manager(base);
+  ebpf_monitor::LogExporterInterface *logger = nullptr;
+  ebpf_monitor::MetricExporterInterface *metric_exporter = nullptr;
+  ebpf_monitor::H2GoCorrelator correlator;
   absl::Status status;
-  bool file_logging;
-  bool host_agg;
 
-  bool gcp_logging, oc_gcp_logging;
-  std::string gcp_creds;
-  std::string gcp_project;
-
-  std::vector<pid_t> pids;
-  std::vector<std::string> custom_labels;
-
-  try {
-    TCLAP::CmdLine cmd("eBPF gRPC golang h2 and tcp tracer", ' ', "0.1");
-    TCLAP::SwitchArg file_log_switch("f", "file", "Log to file", cmd, false);
-    TCLAP::SwitchArg host_agg_switch("s", "host_level",
-                                     "Aggregate at host level", cmd, false);
-    TCLAP::SwitchArg gcp_log_switch(
-        "g", "gcp", "(Deprecated Please use -o) Use stackdriver to export.",
-        cmd, false);
-    TCLAP::SwitchArg oc_gcp_log_switch(
-        "o", "oc_gcp", "Use opencensus stackdriver to export", cmd, false);
-    TCLAP::ValueArg<std::string> gcp_creds_cmd("c", "gcp_json_creds",
-                                               "File path to read", false, "",
-                                               "service acoount credentials");
-    TCLAP::ValueArg<std::string> gcp_project_cmd("p", "gcp_Project",
-                                                 "GCP metrics to export data",
-                                                 false, "", "Project id");
-    TCLAP::MultiArg<std::string> custom_labels_cmd(
-        "l", "custom_labels",
-        "Labels to attach to opencensus metrics <key>:<value>", false,
-        "string");
-    cmd.add(custom_labels_cmd);
-    TCLAP::UnlabeledMultiArg<pid_t> pids_arg(
-        "pids", "List of PIDs to be traced.", true, "pid_t");
-    cmd.add(pids_arg);
-    cmd.add(gcp_creds_cmd);
-    cmd.add(gcp_project_cmd);
-    cmd.parse(argc, argv);
-    file_logging = file_log_switch.getValue();
-    gcp_logging = gcp_log_switch.getValue();
-    if (gcp_logging == true) {
-      std::cerr << "Option -g is deprecated please use -o" << std::endl;
-    }
-    oc_gcp_logging = oc_gcp_log_switch.getValue();
-    gcp_creds = gcp_creds_cmd.getValue();
-    gcp_project = gcp_project_cmd.getValue();
-    pids = pids_arg.getValue();
-    custom_labels = custom_labels_cmd.getValue();
-    host_agg = host_agg_switch.getValue();
-  } catch (TCLAP::ArgException &e) {
-    std::cerr << "error: " << e.error() << " for arg " << e.argId()
-              << std::endl;
+  status = data_manager.Init();
+  if (!status.ok()) {
+    std::cerr << status << std::endl;
     return -1;
   }
 
-  if (file_logging) {
-    logger = new prober::FileLogger(1, 1048576 * 50, "./logs/");
+  auto pids_str = absl::ParseCommandLine(argc, argv);
+  if (pids_str.empty()){
+    std::cerr << "Please provide pids in command line arguments" << std::endl;
+    return -1;
+  }
+
+  std::string gcp_creds = absl::GetFlag(FLAGS_gcp_creds);
+  std::string gcp_project = absl::GetFlag(FLAGS_gcp_project);
+
+  if (absl::GetFlag(FLAGS_file_log)) {
+    logger = new ebpf_monitor::FileLogger(1, 1048576 * 50, "./logs/");
     metric_exporter =
-        new prober::FileMetricExporter(1, 1048576 * 50, "./metrics/");
-  } else if (gcp_logging) {
+        new ebpf_monitor::FileMetricExporter(1, 1048576 * 50, "./metrics/");
+  } else if (absl::GetFlag(FLAGS_opencensus_log)) {
     if (gcp_project.empty()) {
       std::cerr << "GCP project name must be specified" << std::endl;
       return -1;
     }
-    logger = new prober::GCPLogger(gcp_project, gcp_creds);
-    metric_exporter = new prober::GCPMetricExporter(gcp_project, gcp_creds);
-  } else if (oc_gcp_logging) {
-    if (gcp_project.empty()) {
-      std::cerr << "GCP project name must be specified" << std::endl;
-      return -1;
+    ebpf_monitor::AggregationLevel agg =
+        ebpf_monitor::AggregationLevel::kConnection;
+    if (absl::GetFlag(FLAGS_host_agg)) {
+      agg = ebpf_monitor::AggregationLevel::kHost;
     }
-    prober::AggregationLevel agg = prober::AggregationLevel::kConnection;
-    if (host_agg) {
-      agg = prober::AggregationLevel::kHost;
-    }
-    logger = new prober::GCPLogger(gcp_project, gcp_creds);
+    logger = new ebpf_monitor::GCPLogger(gcp_project, gcp_creds);
     auto oc_metric_exporter =
-        new prober::OCGCPMetricExporter(gcp_project, gcp_creds, agg);
+        new ebpf_monitor::OCGCPMetricExporter(gcp_project, gcp_creds, agg);
     metric_exporter = oc_metric_exporter;
     absl::flat_hash_map<std::string, std::string> oc_labels;
-    for (auto label : custom_labels) {
+    for (const auto& label : absl::GetFlag(FLAGS_custom_labels)) {
       auto pos = label.find(":");
       if (pos == std::string::npos) {
         std::cerr << "Delimter : not found for " << label << std::endl;
@@ -139,8 +118,8 @@ int main(int argc, char **argv) {
       return 0;
     }
   } else {
-    logger = new prober::StdoutEventExporter();
-    metric_exporter = new prober::StdoutMetricExporter();
+    logger = new ebpf_monitor::StdoutEventExporter();
+    metric_exporter = new ebpf_monitor::StdoutMetricExporter();
   }
 
   if (logger == nullptr || metric_exporter == nullptr) {
@@ -159,29 +138,43 @@ int main(int argc, char **argv) {
     return -1;
   }
 
-  prober::MapSource map_source;
+  /* Maps need to be loaded first so that we can share fds*/
+  ebpf_monitor::MapSource map_source;
   status = map_source.Init();
   if (!status.ok()) {
     std::cerr << status << std::endl;
     return -1;
   }
-  status = map_source.LoadObj();
-  if (!status.ok()) {
-    std::cerr << status << std::endl;
-    return -1;
+  const bool dry_run = absl::GetFlag(FLAGS_dry_run);
+  if (!dry_run) {
+    status = map_source.LoadObj();
+    if (!status.ok()) {
+      std::cerr << status << std::endl;
+      return -1;
+    }
+    status = map_source.LoadMaps();
+    if (!status.ok()) {
+      std::cerr << status << std::endl;
+      return -1;
+    }
   }
-  status = map_source.LoadMaps();
-  if (!status.ok()) {
-    std::cerr << status << std::endl;
-    return -1;
-  }
-  
-  std::vector<prober::DataSource *> sources;
-  auto h2_source = new prober::H2GoGrpcSource();
+
+  std::vector<std::shared_ptr<ebpf_monitor::Source> > sources;
+  auto h2_source = std::make_shared<ebpf_monitor::H2GoGrpcSource>();
+  auto tcp_source = std::make_shared<ebpf_monitor::TcpSource>();
+
   sources.emplace_back(h2_source);
-  sources.emplace_back(&tcp_source);
-  correlator.AddSource(prober::Layer::kTCP, &tcp_source);
-  correlator.AddSource(prober::Layer::kHTTP2, h2_source);
+  sources.emplace_back(tcp_source);
+  correlator.AddSource(ebpf_monitor::Layer::kTCP, tcp_source);
+  correlator.AddSource(ebpf_monitor::Layer::kHTTP2, h2_source);
+  std::vector<pid_t> pids;
+  for (auto pid_str : pids_str) {
+    pid_t pid;
+    if (absl::SimpleAtoi(pid_str, &pid)) {
+      pids.push_back(pid);
+    }
+  }
+
   for (pid_t pid : pids) {
     status = h2_source->AddPID(pid);
     if (!status.ok()) {
@@ -192,66 +185,70 @@ int main(int argc, char **argv) {
 
   logger->RegisterCorrelator(&correlator);
   metric_exporter->RegisterCorrelator(&correlator);
-  for (auto source : sources) {
+  for (const auto& source : sources) {
     status = source->Init();
     if (!status.ok()) {
       std::cerr << status << std::endl;
       return -1;
     }
-    status = source->LoadObj();
-    if (!status.ok()) {
-      std::cerr << status << std::endl;
-      return -1;
-    }
 
-    status = source->LoadMaps();
-    if (!status.ok()) {
-      std::cerr << status << std::endl;
-      return -1;
-    }
-
-    for (pid_t pid : pids) {
-      status = source->FilterPID(pid);
+    if (!dry_run) {
+      status = source->LoadObj();
       if (!status.ok()) {
         std::cerr << status << std::endl;
         return -1;
       }
-    }
-    auto log_sources = source->GetLogSources();
-    for (uint32_t i = 0; i < log_sources.size(); i++) {
-      if (log_sources[i]->internal_ == false) {
-        status = logger->RegisterLog(log_sources[i]->name_,
-                                     log_sources[i]->log_desc_);
+      status = source->LoadMaps();
+      if (!status.ok()) {
+        std::cerr << status << std::endl;
+        return -1;
+      }
+      for (pid_t pid : pids) {
+        status = source->FilterPID(pid);
         if (!status.ok()) {
-          if (log_sources[i]->shared_ && !absl::IsAlreadyExists(status)){
+          std::cerr << status << std::endl;
+          return -1;
+        }
+      }
+
+      auto log_sources = source->GetLogSources();
+      for (uint32_t i = 0; i < log_sources.size(); i++) {
+        if (log_sources[i]->is_internal() == false) {
+          status = logger->RegisterLog(std::string(log_sources[i]->get_name()),
+                                      log_sources[i]->get_log_desc());
+          if (!status.ok()) {
+            std::cerr << status << std::endl;
+            return -1;
+          }
+        }
+        status = data_manager.Register(log_sources[i]);
+        if (!status.ok()) {
+          if (log_sources[i]->is_shared() && !absl::IsAlreadyExists(status)){
             std::cerr << status << std::endl;
             return -1;
           }
         }
       }
-      status = data_manager.Register(log_sources[i]);
-      if (!status.ok()) {
-        std::cerr << status << std::endl;
-        return -1;
-      }
-    }
 
-    auto metric_sources = source->GetMetricSources();
-    for (uint32_t i = 0; i < metric_sources.size(); i++) {
-      if (metric_sources[i]->internal_ == false) {
-        status = metric_exporter->RegisterMetric(
-            metric_sources[i]->name_, metric_sources[i]->metric_desc_);
-        if (!status.ok()) {
-          if (metric_sources[i]->shared_ && !absl::IsAlreadyExists(status)){
-            std::cerr << status << std::endl;
-            return -1;
+      auto metric_sources = source->GetMetricSources();
+      for (uint32_t i = 0; i < metric_sources.size(); i++) {
+        if (metric_sources[i]->is_internal() == false) {
+          status = metric_exporter->RegisterMetric(
+              std::string(metric_sources[i]->get_name()),
+              metric_sources[i]->get_metric_desc());
+          if (!status.ok()) {
+            if (metric_sources[i]->is_shared() &&
+                !absl::IsAlreadyExists(status)){
+              std::cerr << status << std::endl;
+              return -1;
+            }
           }
         }
-      }
-      status = data_manager.Register(metric_sources[i]);
-      if (!status.ok()) {
-        std::cerr << status << std::endl;
-        return -1;
+        status = data_manager.Register(metric_sources[i]);
+        if (!status.ok()) {
+          std::cerr << status << std::endl;
+          return -1;
+        }
       }
     }
   }
@@ -259,36 +256,40 @@ int main(int argc, char **argv) {
   data_manager.AddExternalLogHandler(logger);
   data_manager.AddExternalMetricHandler(metric_exporter);
 
-  status = correlator.Init();
-  if (!status.ok()) {
-    std::cerr << status << std::endl;
-  }
-
-  auto log_sources = correlator.GetLogSources();
-  for (auto &source : log_sources) {
-    status = data_manager.AddLogHandler(source->name_, &correlator);
+    if (!dry_run) {
+    status = correlator.Init();
     if (!status.ok()) {
       std::cerr << status << std::endl;
     }
-  }
+    auto log_sources = correlator.GetLogSources();
+    for (auto &source : log_sources) {
+      status = data_manager.AddLogHandler(source->get_name(), &correlator);
+      if (!status.ok()) {
+        std::cerr << status << std::endl;
+      }
+    }
 
-  auto metric_sources = correlator.GetMetricSources();
-  for (auto &source : metric_sources) {
-    status = data_manager.AddMetricHandler(source->name_, &correlator);
-    if (!status.ok()) {
-      std::cerr << status << std::endl;
+    auto metric_sources = correlator.GetMetricSources();
+    for (auto &source : metric_sources) {
+      status = data_manager.AddMetricHandler(source->get_name(), &correlator);
+      if (!status.ok()) {
+        std::cerr << status << std::endl;
+      }
+    }
+    // Probes must be loaded after correlator init
+    //  so that we don't miss any messages
+    for (const auto& source : sources) {
+      status = source->LoadProbes();
+      if (!status.ok()) {
+        std::cerr << status << std::endl;
+        return -1;
+      }
     }
   }
 
-  // Probes must be loaded after correlator init
-  //  so that we don't miss any messages
-  for (auto source : sources) {
-    status = source->LoadProbes();
-    if (!status.ok()) {
-      std::cerr << status << std::endl;
-      return -1;
-    }
-  }
+  struct event *ev;
+  ev = event_new(base, STDIN_FILENO, EV_READ | EV_PERSIST, check_eof, base);
+  event_add(ev, nullptr);
 
   event_base_dispatch(base);
 

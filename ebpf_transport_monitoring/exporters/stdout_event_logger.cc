@@ -21,9 +21,10 @@
 #include <unordered_map>
 
 #include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "exporters/exporters_util.h"
 
-namespace prober {
+namespace ebpf_monitor {
 
 absl::Status StdoutEventExporter::RegisterLog(std::string name,
                                               LogDesc& log_desc) {
@@ -34,15 +35,15 @@ absl::Status StdoutEventExporter::RegisterLog(std::string name,
   return absl::OkStatus();
 }
 
-absl::Status StdoutEventExporter::HandleData(std::string log_name,
-                                             const void* const data,
-                                             const uint32_t size) {
+absl::Status StdoutEventExporter::HandleData(absl::string_view log_name,
+                                            void* data,
+                                            uint32_t size) {
   absl::Status status;
   if (logs_.find(log_name) == logs_.end()) {
     return absl::NotFoundError("log not registered");
   }
 
-  auto conn_id = ExportersUtil::GetLogConnId(log_name, data);
+  auto conn_id = GetLogConnId(log_name, data);
 
   auto uuid = correlator_->GetUUID(conn_id);
 
@@ -50,7 +51,7 @@ absl::Status StdoutEventExporter::HandleData(std::string log_name,
     return absl::OkStatus();
   }
 
-  auto log_data = ExportersUtil::GetLogString(log_name, *uuid, data);
+  auto log_data = GetLogString(log_name, *uuid, data);
   if (!log_data.ok()) {
     return log_data.status();
   }
@@ -58,4 +59,4 @@ absl::Status StdoutEventExporter::HandleData(std::string log_name,
   return absl::OkStatus();
 }
 
-}  // namespace prober
+}  // namespace ebpf_monitor

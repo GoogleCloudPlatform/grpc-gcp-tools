@@ -136,7 +136,7 @@ struct {
 } tcp_snd_cwnd SEC(".maps");
 
 /* tcp_rcv_cwnd is a map of connections. 
-Recieve window corresponding to tcp connections.
+Receive window corresponding to tcp connections.
 */ 
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);

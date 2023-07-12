@@ -15,20 +15,18 @@
 
 #include "exporters/file_exporter.h"
 
-#include <cstdio>
 #include <string>
-#include <unordered_map>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "events.h"
 #include "exporters/exporters_util.h"
-#include "loader/exporter/data_types.h"
+#include "ebpf_monitor/exporter/data_types.h"
 #include "spdlog/fmt/bin_to_hex.h"
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/spdlog.h"
 
-namespace prober {
+namespace ebpf_monitor {
 
 FileLogger::FileLogger() {
   file_size_ = 1048576 * 50;
@@ -58,30 +56,23 @@ absl::Status FileLogger::RegisterLog(std::string name, LogDesc& log_desc) {
   return absl::OkStatus();
 }
 
-absl::Status FileLogger::HandleData(std::string log_name,
-                                    const void* const data,
-                                    const uint32_t size) {
+absl::Status FileLogger::HandleData(absl::string_view log_name,
+                                    void* data,
+                                    uint32_t size) {
   static uint32_t counter;
   absl::Status status;
-
   if (logs_.find(log_name) == logs_.end()) {
     return absl::NotFoundError("log not registered");
   }
-
-  auto conn_id = ExportersUtil::GetLogConnId(log_name, data);
-
+  auto conn_id = GetLogConnId(log_name, data);
   auto uuid = correlator_->GetUUID(conn_id);
-
   if (!uuid.ok()) {
     return absl::OkStatus();
   }
-
-  auto log_data = ExportersUtil::GetLogString(log_name, *uuid, data);
-
+  auto log_data = GetLogString(log_name, *uuid, data);
   if (!log_data.ok()) {
     return log_data.status();
   }
-
   logger_->info("{}", *log_data);
   if (counter++ > 100) {
     logger_->flush();
@@ -119,49 +110,41 @@ absl::Status FileMetricExporter::RegisterMetric(std::string name,
   return absl::OkStatus();
 }
 
-absl::Status FileMetricExporter::HandleData(std::string metric_name, void* key,
-                                            void* value) {
+absl::Status FileMetricExporter::HandleData(absl::string_view metric_name,
+                                            void* key, void* value) {
   static uint32_t counter;
   auto it = metrics_.find(metric_name);
   if (it == metrics_.end()) {
     return absl::NotFoundError("metric_name not found");
   }
-
   metric_format_t* metric = (metric_format_t*)value;
-
   auto uuid = correlator_->GetUUID(*(uint64_t*)key);
-
   if (!uuid.ok()) {
     return absl::OkStatus();
   }
-
   if (!last_read_.CheckMetricTime(metric_name, *uuid, metric->timestamp).ok()) {
     return absl::OkStatus();
   }
-
-  auto metric_str = ExportersUtil::GetMetricString(
+  auto metric_str = GetMetricString(
       metric_name, *uuid, it->second, key, &(metric->data));
   if (!metric_str.ok()) {
     return metric_str.status();
   }
-
   logger_->info("{}", *metric_str);
-
   if (counter++ > 100) {
     logger_->flush();
     counter = 0;
   }
-
   return absl::OkStatus();
 }
 
 void FileMetricExporter::Cleanup() {
   auto uuids = last_read_.GetUUID();
-  for (auto uuid : uuids) {
+  for (const auto& uuid : uuids) {
     if (!correlator_->CheckUUID(uuid)) {
       last_read_.DeleteValue(uuid);
     }
   }
 }
 
-}  // namespace prober
+}  // namespace ebpf_monitor

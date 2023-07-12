@@ -16,9 +16,7 @@
 
 #include <stdlib.h>
 
-#include <cstdint>
 #include <string>
-#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
@@ -27,7 +25,7 @@
 #include "curl/curl.h"
 #include "curl/easy.h"
 
-namespace prober {
+namespace ebpf_monitor {
 
 struct MemoryStruct {
   char *memory;
@@ -45,7 +43,6 @@ static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb,
     printf("not enough memory (realloc returned NULL)\n");
     return 0;
   }
-
   memcpy(&(mem->memory[0]), contents, realsize);
   mem->size = realsize + 1;
   mem->memory[mem->size-1] = 0;
@@ -60,12 +57,9 @@ CURL *SetupHandle(struct MemoryStruct *chunk) {
   curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
   curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)chunk);
   curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
-
   struct curl_slist *list;
   list = curl_slist_append(NULL, "Metadata-Flavor: Google");
-
   curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, list);
-
   return curl_handle;
 }
 
@@ -77,11 +71,8 @@ GCEMetadata::GetGCEMetadata() {
   chunk.memory =
       (char *)malloc(1); /* will be grown as needed by the realloc above */
   chunk.size = 0;        /* no data at this point */
-
   CURL *curl_handle = SetupHandle(&chunk);
-
   absl::flat_hash_map<std::string, std::string> labels;
-
   absl::flat_hash_map<std::string, std::string> urls = {
       {"Zone",
        "http://metadata.google.internal/computeMetadata/v1/instance/zone"},
@@ -93,9 +84,7 @@ GCEMetadata::GetGCEMetadata() {
 
   for (auto iter = urls.begin(); iter != urls.end(); ++iter) {
     curl_easy_setopt(curl_handle, CURLOPT_URL, iter->second.c_str());
-
     res = curl_easy_perform(curl_handle);
-
     if (res != CURLE_OK) {
       return absl::InternalError(
           absl::StrFormat("Could not query metadata %s %s %s", iter->first,
@@ -106,11 +95,10 @@ GCEMetadata::GetGCEMetadata() {
   }
 
   curl_easy_cleanup(curl_handle);
-
   free(chunk.memory);
   curl_global_cleanup();
 
   return labels;
 }
 
-}  // namespace prober
+}  // namespace ebpf_monitor
