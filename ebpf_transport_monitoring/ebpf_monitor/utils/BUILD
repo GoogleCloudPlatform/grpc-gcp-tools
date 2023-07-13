@@ -31,6 +31,11 @@ cc_library(
 )
 
 cc_library(
+    name = "utils",
+    hdrs = ["utils.h"],
+)
+
+cc_library(
     name = "sym_addrs",
     hdrs = ["sym_addrs.h"],
 )
@@ -80,6 +85,7 @@ cc_library(
     hdrs = ["dwarf_reader.h"],
     deps = [
         ":sym_addrs",
+        ":utils",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status",
@@ -95,8 +101,11 @@ cc_library(
     hdrs = ["source_helper.h"],
     deps = [
         ":archive_handler",
+        ":dwarf_reader",
         ":elf_reader",
         ":os_helper",
+        ":proc_reader",
+        ":utils",
         "//sources/bpf_sources:sources_obj",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

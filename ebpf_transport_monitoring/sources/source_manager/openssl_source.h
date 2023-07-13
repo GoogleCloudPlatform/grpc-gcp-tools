@@ -12,35 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef _SOURCES_SOURCE_MANAGER_H2_GO_GRPC_SOURCE_H_
-#define _SOURCES_SOURCE_MANAGER_H2_GO_GRPC_SOURCE_H_
+#ifndef _SOURCES_OPENSSL_SOURCE_H_
+#define _SOURCES_OPENSSL_SOURCE_H_
 
 #include <string>
 
-#include "sources/common/h2_symaddrs.h"
 #include "ebpf_monitor/source/source.h"
 #include "ebpf_monitor/utils/elf_reader.h"
 
 namespace ebpf_monitor {
-class H2GoGrpcSource : public Source {
+
+/*
+ * In the first revision we will only trace when OpenSSL or BoringSSL is linked
+ * statically.
+ */
+class OpenSslSource : public Source {
  public:
-  H2GoGrpcSource();
+  OpenSslSource();
   absl::Status AddPID(uint64_t pid);
-  absl::Status LoadMaps() override;
-  ~H2GoGrpcSource() override;
-  std::string ToString() const override { return "H2GoGrpcSource"; };
+  ~OpenSslSource() override;
+  std::string ToString() const override { return "OpenSslSource"; };
 
  private:
-  absl::Status CreateProbes(ElfReader* elf_reader,
-                            std::string& path,
-                            absl::flat_hash_set<std::string>& functions,
-                            const char* probe_func);
   absl::Status RegisterProbes(ElfReader* elf_reader, std::string& path,
                               uint64_t pid);
-  absl::flat_hash_map<uint64_t, h2_cfg_t> bpf_cfg_;
-  absl::flat_hash_map<std::string, uint64_t> pid_path_map_;
 };
 
 }  // namespace ebpf_monitor
 
-#endif  // _SOURCES_SOURCE_MANAGER_H2_GO_GRPC_SOURCE_H_
+#endif  // _SOURCES_OPENSSL_SOURCE_H_

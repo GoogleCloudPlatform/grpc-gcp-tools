@@ -24,6 +24,7 @@
 
 #define VERSION 1
 
+#define FRAME_HEADER_SIZE 9
 /*
  Maximum PIDs that can be tracked at once.
  The more PIDs being traced at once the higher the probability that events

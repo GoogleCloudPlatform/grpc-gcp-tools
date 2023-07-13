@@ -260,7 +260,7 @@ static void InitCfg(h2_cfg_t* bpf_cfg) {
 }
 
 absl::Status H2GoGrpcSource::CreateProbes(
-    ElfReader* elf_reader, uint64_t pid, std::string& path,
+    ElfReader* elf_reader, std::string& path,
     absl::flat_hash_set<std::string>& functions, const char* probe_func) {
   auto status = elf_reader->FindSymbols(functions, ElfReader::kOffset);
   if (!status.ok()) {
@@ -276,7 +276,7 @@ absl::Status H2GoGrpcSource::CreateProbes(
     }
     count++;
     probes_.push_back(
-        std::make_shared<UProbe>(probe_func, path, *offset, false, pid));
+        std::make_shared<UProbe>(probe_func, path, *offset, false));
   }
 
   if (count == 0) {
@@ -294,7 +294,7 @@ absl::Status H2GoGrpcSource::RegisterProbes(ElfReader* elf_reader,
       {"transport.(*http2Client).handleRSTStream"},
       {"transport.(*http2Client).handleGoAway"},
   };
-  auto status = CreateProbes(elf_reader, pid, path, client_functions,
+  auto status = CreateProbes(elf_reader, path, client_functions,
                              "probe_handle_client_data");
   EBPF_TM_RETURN_IF_ERROR(status);
 
@@ -302,41 +302,44 @@ absl::Status H2GoGrpcSource::RegisterProbes(ElfReader* elf_reader,
       {"transport.(*http2Server).handleData"},
       {"transport.(*http2Server).handleRSTStream"},
   };
-  status = CreateProbes(elf_reader, pid, path, server_functions,
+  status = CreateProbes(elf_reader, path, server_functions,
                         "probe_handle_server_data");
   EBPF_TM_RETURN_IF_ERROR(status);
   absl::flat_hash_set<std::string> server_header_functions{
       {"transport.(*http2Server).operateHeaders"}};
-  status = CreateProbes(elf_reader, pid, path, server_header_functions,
+  status = CreateProbes(elf_reader, path, server_header_functions,
                         "probe_handle_server_header");
   EBPF_TM_RETURN_IF_ERROR(status);
   absl::flat_hash_set<std::string> client_header_functions{
       {"transport.(*http2Client).operateHeaders"}};
-  status = CreateProbes(elf_reader, pid, path, client_header_functions,
+  status = CreateProbes(elf_reader, path, client_header_functions,
                         "probe_handle_client_header");
   EBPF_TM_RETURN_IF_ERROR(status);
   absl::flat_hash_set<std::string> buf_writer_functions{
       {"transport.(*bufWriter).Write"}};
-  status = CreateProbes(elf_reader, pid, path, buf_writer_functions,
+  status = CreateProbes(elf_reader, path, buf_writer_functions,
                         "probe_sent_frame");
   EBPF_TM_RETURN_IF_ERROR(status);
   absl::flat_hash_set<std::string> close_functions{
       {"transport.(*http2Client).Close"}, {"transport.(*http2Server).Close"}};
-  return CreateProbes(elf_reader, pid, path, close_functions, "probe_close");
+  return CreateProbes(elf_reader, path, close_functions, "probe_close");
 }
 
 absl::Status H2GoGrpcSource::AddPID(uint64_t pid) {
   int major_version, minor_version;
-
   if (bpf_cfg_.find(pid) != bpf_cfg_.end()) {
     return absl::AlreadyExistsError(absl::StrFormat("Pid %d", pid));
   }
-
   auto path = GetBinaryPath(pid);
   if (!path.ok()) {
     return path.status();
   }
-
+  // If probes are already attached no need to do the following steps again.
+  // Just copy the config to the corresponding to that pid
+  if (pid_path_map_.find(*path) != pid_path_map_.end()) {
+    bpf_cfg_[pid] = bpf_cfg_[pid_path_map_[*path]];
+    return absl::OkStatus();
+  }
   std::cout << "Path:" << *path << std::endl;
   ElfReader elf_reader(*path);
 
@@ -364,6 +367,7 @@ absl::Status H2GoGrpcSource::AddPID(uint64_t pid) {
   EBPF_TM_RETURN_IF_ERROR(status);
 
   bpf_cfg_[pid] = bpf_cfg;
+  pid_path_map_[*path] = pid;
   return absl::OkStatus();
 }
 

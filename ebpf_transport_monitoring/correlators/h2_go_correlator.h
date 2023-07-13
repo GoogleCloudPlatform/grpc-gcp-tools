@@ -48,6 +48,7 @@ class H2GoCorrelator : public CorrelatorInterface {
                            uint32_t size) override;
   absl::Status HandleData(absl::string_view  metric_name, void* key,
                           void* value) override;
+  void HandleNewConnection (const struct ConnInfo *conn_info);
   bool CheckUUID(std::string uuid) override;
   void Cleanup() override{};
 

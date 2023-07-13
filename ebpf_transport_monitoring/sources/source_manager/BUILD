@@ -67,3 +67,24 @@ cc_library(
         "@libbpf",
     ],
 )
+
+cc_library(
+    name = "openssl_source",
+    srcs = [
+        "openssl_source.cc",
+    ],
+    hdrs = ["openssl_source.h"],
+    deps = [
+        "//ebpf_monitor/source",
+        "//ebpf_monitor/source:probes",
+        "//ebpf_monitor/utils:elf_reader",
+        "//ebpf_monitor/utils:proc_reader",
+        "//ebpf_monitor/utils:sym_addrs",
+        "//sources/common:defines",
+        "//sources/common:syms",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:str_format",
+        "@libbpf",
+    ],
+)

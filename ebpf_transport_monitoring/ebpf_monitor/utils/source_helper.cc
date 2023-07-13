@@ -27,6 +27,9 @@
 #include "ebpf_monitor/utils/os_helper.h"
 #include "bpf/libbpf.h"
 #include "re2/re2.h"
+#include "ebpf_monitor/utils/dwarf_reader.h"
+#include "ebpf_monitor/utils/utils.h"
+#include "ebpf_monitor/utils/proc_reader.h"
 
 extern unsigned char _binary_reduced_btfs_tar_gz_start[] __attribute__((weak));
 extern unsigned char _binary_reduced_btfs_tar_gz_end[] __attribute__((weak));
@@ -92,6 +95,16 @@ bool VmlinuxExists() {
   if (!access("/sys/kernel/btf/vmlinux", R_OK)) return true;
   return false;
 }
+
+absl::StatusOr<SourceLanguage> DetectSourceLanguauge(int pid){
+  auto path = GetBinaryPath(pid);
+  if (!path.ok()) {
+    return path.status();
+  }
+  DwarfReader reader(*path);
+  return reader.GetSourceLanguage();
+}
+
 
 absl::StatusOr<std::string> GetBtfFilePath() {
   OsHelper helper;
