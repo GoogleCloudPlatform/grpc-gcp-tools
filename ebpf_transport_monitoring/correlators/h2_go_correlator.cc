@@ -91,6 +91,13 @@ absl::flat_hash_map<std::string, std::string> H2GoCorrelator::GetLabels(
 
 std::vector<std::string> H2GoCorrelator::GetLabelKeys() { return {{"pid"}}; }
 
+void H2GoCorrelator::HandleNewConnection (const struct ConnInfo *conn_info) {
+  if (conn_info->tcp_conn_id != 0 && conn_info->h2_conn_id != 0) {
+    connection_map_[conn_info->tcp_conn_id] = conn_info->UUID;
+    connection_map_[conn_info->h2_conn_id] = conn_info->UUID;
+  }
+}
+
 absl::Status H2GoCorrelator::HandleHTTP2(void * data) {
   const correlator_ip_t *const c_data =
       static_cast<const correlator_ip_t *const>(data);
@@ -129,10 +136,7 @@ absl::Status H2GoCorrelator::HandleHTTP2(void * data) {
     this->correlator_[key].h2_conn_id = c_data->conn_id;
   }
   conn_info = this->correlator_[key];
-  if (conn_info.tcp_conn_id != 0 && conn_info.h2_conn_id != 0) {
-    connection_map_[conn_info.tcp_conn_id] = conn_info.UUID;
-    connection_map_[conn_info.h2_conn_id] = conn_info.UUID;
-  }
+  HandleNewConnection(&conn_info);
   return absl::OkStatus();
 }
 
@@ -163,12 +167,10 @@ absl::Status H2GoCorrelator::HandleHTTP2Events(void * data) {
 absl::Status H2GoCorrelator::HandleTCP(void * data) {
   const ec_ebpf_events_t *const event =
       static_cast<const ec_ebpf_events_t *const>(data);
-
   switch (event->mdata.event_type) {
     case EC_TCP_EVENT_START: {
       char src_address[INET6_ADDRSTRLEN];
       char dest_address[INET6_ADDRSTRLEN];
-
       const ec_tcp_start_t *start = (const ec_tcp_start_t *)(event->event_info);
       if (inet_ntop(start->family, &start->saddr6, &src_address[0],
                     INET6_ADDRSTRLEN) == nullptr) {
@@ -181,7 +183,6 @@ absl::Status H2GoCorrelator::HandleTCP(void * data) {
       std::string key = absl::StrFormat(
           "%s:%d->%s:%d", src_address, start->sport,
           dest_address, start->dport);
-
       struct ConnInfo conn_info = {0};
       if (this->correlator_.find(key) == this->correlator_.end()) {
         conn_info.UUID = key;
@@ -192,12 +193,8 @@ absl::Status H2GoCorrelator::HandleTCP(void * data) {
         this->correlator_[key].tcp_conn_id = event->mdata.connection_id;
         this->correlator_[key].pid = event->mdata.pid;
       }
-
       conn_info = this->correlator_[key];
-      if (conn_info.tcp_conn_id != 0 && conn_info.h2_conn_id != 0) {
-        connection_map_[conn_info.tcp_conn_id] = conn_info.UUID;
-        connection_map_[conn_info.h2_conn_id] = conn_info.UUID;
-      }
+      HandleNewConnection(&conn_info);
       break;
     }
     case EC_TCP_EVENT_STATE_CHANGE: {

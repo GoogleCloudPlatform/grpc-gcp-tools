@@ -24,6 +24,7 @@
 #include "absl/status/statusor.h"
 #include "elfutils/libdw.h"
 #include "ebpf_monitor/utils/sym_addrs.h"
+#include "ebpf_monitor/utils/utils.h"
 
 namespace ebpf_monitor {
 
@@ -35,6 +36,7 @@ class DwarfReader {
           variables);
   absl::StatusOr<member_var_t> GetMemberVar(absl::string_view struct_name,
                                             absl::string_view member_name);
+  absl::StatusOr<SourceLanguage> GetSourceLanguage();
  private:
   bool CheckDie(
       Dwarf_Die* die,

@@ -90,16 +90,15 @@ class RawTPProbe : public Probe {
 class UProbe : public Probe {
  public:
   UProbe(absl::string_view name, absl::string_view binary_name,
-         uint64_t func_offset, bool retprobe, pid_t pid)
+         uint64_t func_offset, bool retprobe)
       : Probe(name),
         binary_name_(binary_name),
         func_offset_(func_offset),
-        retprobe_(retprobe),
-        pid_(pid) {}
+        retprobe_(retprobe){}
   absl::Status Attach() override {
     auto prog = get_prog();
     if (prog == nullptr) return absl::NotFoundError("Prog not set");
-    auto link = bpf_program__attach_uprobe(prog, retprobe_, pid_,
+    auto link = bpf_program__attach_uprobe(prog, retprobe_, -1,
                                        binary_name_.c_str(), func_offset_);
     if (link == nullptr) {
       return absl::InternalError(absl::StrCat("Attach failed, errno=",
@@ -114,7 +113,6 @@ class UProbe : public Probe {
   std::string binary_name_;
   uint64_t func_offset_;
   bool retprobe_;
-  pid_t pid_;
 };
 
 class KProbe : public Probe {

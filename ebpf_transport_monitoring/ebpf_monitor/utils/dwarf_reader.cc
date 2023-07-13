@@ -21,7 +21,6 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
-#include <string_view>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
@@ -31,6 +30,7 @@
 #include "dwarf.h"
 #include "elfutils/libdw.h"
 #include "ebpf_monitor/utils/sym_addrs.h"
+#include "ebpf_monitor/utils/utils.h"
 
 namespace ebpf_monitor {
 
@@ -205,6 +205,63 @@ absl::StatusOr<member_var_t> DwarfReader::GetMemberVar(
       "member %s of struct %s not found with DWARF", member_name, struct_name));
   }
   return itin->second;
+}
+
+absl::StatusOr<SourceLanguage> DwarfReader::GetSourceLanguage(){
+  int fd = open(binary_path_.c_str(), O_RDONLY);
+  if (fd < 0) {
+    return absl::NotFoundError("Binary Path could not be opened");
+  }
+  Dwarf* dwarf = dwarf_begin(fd, DWARF_C_READ);
+  if (dwarf == NULL) {
+    close(fd);
+    return absl::InternalError(
+        absl::StrFormat("Dwarf Error: %s", dwarf_errmsg(-1)));
+  }
+
+  Dwarf_Off off = 0;
+  Dwarf_Off next_off = 0;
+  size_t header_size = 0;
+  Dwarf_Attribute attr;
+  uint64_t lang = 0;
+  while (dwarf_nextcu(dwarf, off, &next_off, &header_size, NULL, NULL, NULL) ==
+         0) {
+    Dwarf_Die die_mem;
+    Dwarf_Die* die = dwarf_offdie(dwarf, off + header_size, &die_mem);
+    off = next_off;
+    if (die == NULL) {break;}
+    if (dwarf_hasattr(die, DW_AT_language) == 0) {
+      continue;
+    }
+    dwarf_attr(die, DW_AT_language, &attr);
+    dwarf_formudata(&attr, &lang);
+    break;
+  }
+  SourceLanguage retVal;
+  if (lang == 0) {
+    retVal = SourceLanguage::kLangUnknown;
+  } else {
+    switch (lang) {
+      case  DW_LANG_C89:
+      case DW_LANG_C:
+      case DW_LANG_C99:
+        retVal = SourceLanguage::kLangC;
+        break;
+      case DW_LANG_C_plus_plus:
+      case DW_LANG_C_plus_plus_03:
+      case DW_LANG_C_plus_plus_11:
+      case DW_LANG_C11:
+      case DW_LANG_C_plus_plus_14:
+        retVal = SourceLanguage::kLangCpp;
+        break;
+      case DW_LANG_Go:
+        retVal = SourceLanguage::kLangGo;
+        break;
+    }
+  }
+  dwarf_end(dwarf);
+  close(fd);
+  return retVal;
 }
 
 }  // namespace ebpf_monitor
