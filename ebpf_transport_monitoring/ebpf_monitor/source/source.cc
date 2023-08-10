@@ -66,7 +66,7 @@ absl::Status Source::Init(bool extract_source) {
       std::cerr << path.status() << std::endl;
       dir_path = ".";
     }else {
-      dir_path = *path;
+      dir_path = std::string(*path);
     }
   } else {
     dir_path = ".";

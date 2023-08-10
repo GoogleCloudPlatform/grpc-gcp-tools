@@ -1,6 +1,5 @@
 # eBPF code for observability into network traffic
 load("@rules_license//rules:license.bzl", "license")
-load("//third_party/bazel_rules/rules_pkg/pkg:tar.bzl", "pkg_tar")
 
 package(
     default_applicable_licenses = [":license"],
@@ -50,41 +49,6 @@ cc_binary(
     srcs = [
         "lightfoot.cc",
     ],
-    linkstatic = True,
-    deps = [
-        ":data_manager",
-        "//correlators:h2_go_correlator",
-        "//correlators:openssl_correlator",
-        "//ebpf_monitor/correlator",
-        "//ebpf_monitor/exporter:log_exporter",
-        "//ebpf_monitor/exporter:metric_exporter",
-        "//ebpf_monitor/source",
-        "//exporters:file_exporter",
-        "//exporters:gcp_exporter",
-        "//exporters:oc_gcp_exporter",
-        "//exporters:stdout_event_logger",
-        "//exporters:stdout_metric_exporter",
-        "//sources/bpf_sources:sources",
-        "//sources/source_manager:h2_go_grpc_source",
-        "//sources/source_manager:map_source",
-        "//sources/source_manager:openssl_source",
-        "//sources/source_manager:tcp_source",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/flags:parse",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/strings",
-        "@libevent",
-        "@zlib",
-    ],
-)
-
-cc_binary(
-    name = "lightfoot_static",
-    srcs = [
-        "lightfoot.cc",
-    ],
-    linkopts = ["-Wl,--dynamic-linker=/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"],
     linkstatic = True,
     deps = [
         ":data_manager",

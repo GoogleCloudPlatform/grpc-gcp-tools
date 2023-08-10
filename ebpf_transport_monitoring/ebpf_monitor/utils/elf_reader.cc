@@ -164,7 +164,7 @@ absl::Status ElfReader::FindSymbols(
   GElf_Ehdr ehdr;
   absl::Status status;
 
-  int count = 0;
+  uint32_t count = 0;
   symbols_.clear();
   auto fd = OpenElf(binary_path_.c_str(), &e);
   if (!fd.ok()) return fd.status();
