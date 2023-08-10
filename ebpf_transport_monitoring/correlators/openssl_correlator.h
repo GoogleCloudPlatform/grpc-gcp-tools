@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef _CORRELATORS_H2_GO_CORRELATOR_
-#define _CORRELATORS_H2_GO_CORRELATOR_
+#ifndef _CORRELATORS_OPENSSL_CORRELATOR_H_
+#define _CORRELATORS_OPENSSL_CORRELATOR_H_
 
 #include <memory>
 #include <string>
@@ -30,18 +30,17 @@
 
 namespace ebpf_monitor {
 
-class H2GoCorrelator : public CorrelatorInterface {
+class OpenSslCorrelator final : public CorrelatorInterface {
  public:
-  H2GoCorrelator() = default;
-  ~H2GoCorrelator() = default;
+  OpenSslCorrelator() = default;
+  ~OpenSslCorrelator() = default;
   absl::Status Init() override;
-
   absl::StatusOr<std::string> GetUUID(uint64_t eBPF_conn_id) override;
   std::vector<std::shared_ptr<DataCtx> >& GetLogSources() override;
   std::vector<std::shared_ptr<DataCtx> >& GetMetricSources() override;
   absl::flat_hash_map<std::string, std::string> GetLabels(
-      std::string uuid) override;
-  std::vector<std::string> GetLabelKeys() override;
+      std::string uuid) override {return {}; };
+  std::vector<std::string> GetLabelKeys() override {return {};};
 
  private:
   struct ConnInfo {
@@ -53,14 +52,10 @@ class H2GoCorrelator : public CorrelatorInterface {
   absl::Status HandleData(absl::string_view log_name,  void*  data,
                            uint32_t size) override;
   absl::Status HandleData(absl::string_view  metric_name, void* key,
-                          void* value) override;
-  void HandleNewConnection (const struct ConnInfo *conn_info);
+                          void* value) override {return absl::OkStatus();};
+  absl::Status HandleOpenssl(void * data);
   bool CheckUUID(std::string uuid) override;
-  void Cleanup() override{};
-
-  absl::Status HandleTCP(void*  data);
-  absl::Status HandleHTTP2(void*  data);
-  absl::Status HandleHTTP2Events(void*  data);
+  void Cleanup() override {};
 
   std::vector<std::shared_ptr<DataCtx> > log_sources_;
   std::vector<std::shared_ptr<DataCtx> > metric_sources_;
@@ -69,4 +64,5 @@ class H2GoCorrelator : public CorrelatorInterface {
 
 }  // namespace ebpf_monitor
 
-#endif
+
+#endif  // _CORRELATORS_OPENSSL_CORRELATOR_H_

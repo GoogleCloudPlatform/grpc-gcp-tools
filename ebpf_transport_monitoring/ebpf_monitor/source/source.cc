@@ -15,7 +15,7 @@
 #include "ebpf_monitor/source/source.h"
 
 #include <memory>
-#include <ostream>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -44,7 +44,7 @@ Source::Source(std::vector<std::shared_ptr<Probe>> probes,
       pid_filter_map_(pid_filter_map),
       init_(false) {}
 
-absl::Status Source::Init() {
+absl::Status Source::Init(bool extract_source) {
   struct bpf_object_open_opts open_opts;
   memset(&open_opts, 0, sizeof(struct bpf_object_open_opts));
   open_opts.sz = sizeof(struct bpf_object_open_opts);
@@ -58,10 +58,17 @@ absl::Status Source::Init() {
       core = false;
     }
   }
-  auto dir_path =
-      SourceExtractionHelper::GetInstance().GetSourceExtrationPath();
-  if (!dir_path.ok()){
-    std::cerr << dir_path.status() << std::endl;
+  std::string dir_path;
+  if (extract_source) {
+    auto path =
+        SourceExtractionHelper::GetInstance().GetSourceExtrationPath();
+    if (!path.ok()){
+      std::cerr << path.status() << std::endl;
+      dir_path = ".";
+    }else {
+      dir_path = *path;
+    }
+  } else {
     dir_path = ".";
   }
   if (!core) {
@@ -70,7 +77,7 @@ absl::Status Source::Init() {
         "Loading " << file_name_ << std::endl;
     obj_ = bpf_object__open_file(file_name_.c_str(), &open_opts);
   } else {
-    auto file_name_core = absl::StrFormat("%s/%s", *dir_path, file_name_core_);
+    auto file_name_core = absl::StrFormat("%s/%s", dir_path, file_name_core_);
     std::cout << "Loading " << file_name_core << std::endl;
     obj_ = bpf_object__open_file(file_name_core.c_str(), &open_opts);
     if (libbpf_get_error(obj_)) {

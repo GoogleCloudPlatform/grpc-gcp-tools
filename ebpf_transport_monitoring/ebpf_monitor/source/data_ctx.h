@@ -62,6 +62,7 @@ class DataCtx {
   bool is_shared() { return shared_; }
   LogDesc &get_log_desc() { return log_desc_; }
   MetricDesc &get_metric_desc() { return metric_desc_; }
+  ~DataCtx() {}
 
  private:
   SourceType type_;

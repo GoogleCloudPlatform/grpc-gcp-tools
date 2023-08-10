@@ -31,4 +31,22 @@ typedef struct {
   uint64_t conn_id;
 } correlator_ip_t;
 
+typedef enum{
+  kSslNewConnection,
+  kSslCorrelationInfo,
+  kSslMax
+} OpenSslCorrelationType;
+
+typedef struct {
+  uint32_t type;  // OpenSslCorrelationType
+  uint64_t conn_id;
+}openssl_mdata_t;
+
+/*If you increase the size of this structure also increase the size of buffer
+in openssl correlator*/
+typedef struct {
+  openssl_mdata_t mdata;
+  uint8_t info[16];
+} openssl_correlation;
+
 #endif

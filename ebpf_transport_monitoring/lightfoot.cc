@@ -13,11 +13,12 @@
 // limitations under the License.
 
 #include <unistd.h>
-#include <string>
+
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <ostream>
+#include <string>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -26,6 +27,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/numbers.h"
 #include "correlators/h2_go_correlator.h"
+#include "correlators/openssl_correlator.h"
 #include "data_manager.h"
 #include "ebpf_monitor/correlator/correlator.h"
 #include "ebpf_monitor/exporter/log_exporter.h"
@@ -37,12 +39,13 @@
 #include "exporters/stdout_event_logger.h"
 #include "exporters/stdout_metric_exporter.h"
 #include "sources/source_manager/h2_go_grpc_source.h"
-#include "sources/source_manager/tcp_source.h"
 #include "sources/source_manager/map_source.h"
-
+#include "sources/source_manager/openssl_source.h"
+#include "sources/source_manager/tcp_source.h"
 #include "event2/event.h"
 
 ABSL_FLAG(bool, dry_run, false, "Run without loading eBPF code");
+ABSL_FLAG(bool, extract_source, true, "Extract source from linked tar");
 ABSL_FLAG(bool, file_log, false, "Log to file");
 ABSL_FLAG(bool, host_agg, false, "Aggregate at host level");
 ABSL_FLAG(bool, opencensus_log, false,
@@ -66,7 +69,6 @@ int main(int argc, char **argv) {
   ebpf_monitor::DataManager data_manager(base);
   ebpf_monitor::LogExporterInterface *logger = nullptr;
   ebpf_monitor::MetricExporterInterface *metric_exporter = nullptr;
-  ebpf_monitor::H2GoCorrelator correlator;
   absl::Status status;
 
   status = data_manager.Init();
@@ -140,7 +142,7 @@ int main(int argc, char **argv) {
 
   /* Maps need to be loaded first so that we can share fds*/
   ebpf_monitor::MapSource map_source;
-  status = map_source.Init();
+  status = map_source.Init(absl::GetFlag(FLAGS_extract_source));
   if (!status.ok()) {
     std::cerr << status << std::endl;
     return -1;
@@ -160,13 +162,25 @@ int main(int argc, char **argv) {
   }
 
   std::vector<std::shared_ptr<ebpf_monitor::Source> > sources;
-  auto h2_source = std::make_shared<ebpf_monitor::H2GoGrpcSource>();
   auto tcp_source = std::make_shared<ebpf_monitor::TcpSource>();
 
+  auto h2_source = std::make_shared<ebpf_monitor::H2GoGrpcSource>();
+  auto openssl_source = std::make_shared<ebpf_monitor::OpenSslSource>();
+  std::shared_ptr<ebpf_monitor::H2GoCorrelator> golang_correlator =
+      std::make_shared<ebpf_monitor::H2GoCorrelator>();
   sources.emplace_back(h2_source);
   sources.emplace_back(tcp_source);
-  correlator.AddSource(ebpf_monitor::Layer::kTCP, tcp_source);
-  correlator.AddSource(ebpf_monitor::Layer::kHTTP2, h2_source);
+  golang_correlator->AddSource(ebpf_monitor::Layer::kTCP, tcp_source);
+  golang_correlator->AddSource(ebpf_monitor::Layer::kHTTP2, h2_source);
+
+  std::shared_ptr<ebpf_monitor::OpenSslCorrelator> openssl_correlator
+      = std::make_shared<ebpf_monitor::OpenSslCorrelator>();
+  openssl_correlator->AddSource(ebpf_monitor::Layer::kHTTP2, openssl_source);
+  sources.emplace_back(openssl_source);
+
+  std::vector<std::shared_ptr<ebpf_monitor::CorrelatorInterface> > correlators;
+  correlators.emplace_back(golang_correlator);
+  correlators.emplace_back(openssl_correlator);
   std::vector<pid_t> pids;
   for (auto pid_str : pids_str) {
     pid_t pid;
@@ -177,21 +191,28 @@ int main(int argc, char **argv) {
 
   for (pid_t pid : pids) {
     status = h2_source->AddPID(pid);
-    if (!status.ok()) {
-      std::cerr << status << std::endl;
-      return -1;
+    if (status.ok()) {
+      continue;
     }
+    status = openssl_source->AddPID(pid);
+    if (status.ok()) {
+      continue;
+    }
+    std::cerr << "ERR: Could not find necessary tracepoints for pid "
+        << pid << std::endl;
   }
 
-  logger->RegisterCorrelator(&correlator);
-  metric_exporter->RegisterCorrelator(&correlator);
+  for (const auto& correlator : correlators) {
+    logger->RegisterCorrelator(correlator);
+    metric_exporter->RegisterCorrelator(correlator);
+  }
+
   for (const auto& source : sources) {
-    status = source->Init();
+    status = source->Init(absl::GetFlag(FLAGS_extract_source));
     if (!status.ok()) {
       std::cerr << status << std::endl;
       return -1;
     }
-
     if (!dry_run) {
       status = source->LoadObj();
       if (!status.ok()) {
@@ -210,15 +231,16 @@ int main(int argc, char **argv) {
           return -1;
         }
       }
-
       auto log_sources = source->GetLogSources();
       for (uint32_t i = 0; i < log_sources.size(); i++) {
         if (log_sources[i]->is_internal() == false) {
           status = logger->RegisterLog(std::string(log_sources[i]->get_name()),
                                       log_sources[i]->get_log_desc());
           if (!status.ok()) {
-            std::cerr << status << std::endl;
-            return -1;
+            if (log_sources[i]->is_shared() && !absl::IsAlreadyExists(status)) {
+              std::cerr << status << std::endl;
+              return -1;
+            }
           }
         }
         status = data_manager.Register(log_sources[i]);
@@ -229,7 +251,6 @@ int main(int argc, char **argv) {
           }
         }
       }
-
       auto metric_sources = source->GetMetricSources();
       for (uint32_t i = 0; i < metric_sources.size(); i++) {
         if (metric_sources[i]->is_internal() == false) {
@@ -252,28 +273,27 @@ int main(int argc, char **argv) {
       }
     }
   }
-
   data_manager.AddExternalLogHandler(logger);
   data_manager.AddExternalMetricHandler(metric_exporter);
-
-    if (!dry_run) {
-    status = correlator.Init();
-    if (!status.ok()) {
-      std::cerr << status << std::endl;
-    }
-    auto log_sources = correlator.GetLogSources();
-    for (auto &source : log_sources) {
-      status = data_manager.AddLogHandler(source->get_name(), &correlator);
+  if (!dry_run) {
+    for (const auto &correlator : correlators) {
+      status = correlator->Init();
       if (!status.ok()) {
         std::cerr << status << std::endl;
       }
-    }
-
-    auto metric_sources = correlator.GetMetricSources();
-    for (auto &source : metric_sources) {
-      status = data_manager.AddMetricHandler(source->get_name(), &correlator);
-      if (!status.ok()) {
-        std::cerr << status << std::endl;
+      auto log_sources = correlator->GetLogSources();
+      for (auto &source : log_sources) {
+        status = data_manager.AddLogHandler(source->get_name(), correlator);
+        if (!status.ok()) {
+          std::cerr << status << std::endl;
+        }
+      }
+      auto metric_sources = correlator->GetMetricSources();
+      for (auto &source : metric_sources) {
+        status = data_manager.AddMetricHandler(source->get_name(), correlator);
+        if (!status.ok()) {
+          std::cerr << status << std::endl;
+        }
       }
     }
     // Probes must be loaded after correlator init
@@ -290,8 +310,6 @@ int main(int argc, char **argv) {
   struct event *ev;
   ev = event_new(base, STDIN_FILENO, EV_READ | EV_PERSIST, check_eof, base);
   event_add(ev, nullptr);
-
   event_base_dispatch(base);
-
   return 0;
 }

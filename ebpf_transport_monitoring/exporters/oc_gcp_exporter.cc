@@ -15,8 +15,11 @@
 #include "exporters/oc_gcp_exporter.h"
 
 #include <cstdio>
+#include <cstdint>
 #include <fstream>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -205,7 +208,7 @@ absl::Status OCGCPMetricExporter::RegisterMetric(std::string name,
   if (measures_.find(name) != measures_.end()) {
     return absl::AlreadyExistsError("metric already registered");
   }
-  if (correlator_ == nullptr) {
+  if (correlators_.empty()) {
     return absl::InternalError(
         "Correlator needs to be registered before metrics");
   }
@@ -230,7 +233,13 @@ absl::Status OCGCPMetricExporter::RegisterMetric(std::string name,
     descriptor.add_column(tag.first);
   }
   if (agg_ == AggregationLevel::kConnection) {
-    auto labels = correlator_->GetLabelKeys();
+    std::vector<std::string> labels;
+    for (auto& correlator : correlators_) {
+      auto src = correlator->GetLabelKeys();
+      labels.insert(labels.end(),
+                    std::make_move_iterator(src.begin()),
+                    std::make_move_iterator(src.end()));
+    }
     for (const auto& it : labels) {
       descriptor.add_column(opencensus::tags::TagKey::Register(it));
     }
@@ -242,7 +251,8 @@ absl::Status OCGCPMetricExporter::RegisterMetric(std::string name,
 }
 
 opencensus::tags::TagMap&
-  OCGCPMetricExporter::GetTagMap(const std::string& uuid) {
+  OCGCPMetricExporter::GetTagMap(const std::string& uuid,
+                              std::shared_ptr<CorrelatorInterface> correlator) {
   if (agg_ == AggregationLevel::kConnection) {
     auto it = tag_maps_.find(uuid);
     if (it != tag_maps_.end()) {
@@ -259,8 +269,7 @@ opencensus::tags::TagMap&
     tag_vector.push_back(
         std::make_pair(opencensus::tags::TagKey::Register("remote_ip"),
                        remote_ip));
-    auto labels = correlator_->GetLabels(uuid);
-
+    auto labels = correlator->GetLabels(uuid);
     for (const auto& label : labels) {
       tag_vector.push_back(std::make_pair(
           opencensus::tags::TagKey::Register(label.first), label.second));
@@ -301,7 +310,16 @@ absl::Status OCGCPMetricExporter::HandleData(absl::string_view metric_name,
   }
   metric_format_t* metric = (metric_format_t*)value;
   auto metric_desc = metrics_.find(metric_name);
-  auto uuid = correlator_->GetUUID(*(uint64_t*)key);
+
+  absl::StatusOr<std::string> uuid;
+  std::shared_ptr<CorrelatorInterface> correlator;
+  for (auto& it : correlators_) {
+    uuid = it->GetUUID(*(uint64_t*)key);
+    if (uuid.ok()) {
+      correlator = it;
+      break;
+    }
+  }
   if (!uuid.ok()) {
     return absl::OkStatus();
   }
@@ -326,7 +344,7 @@ absl::Status OCGCPMetricExporter::HandleData(absl::string_view metric_name,
   if (metric_desc->second.kind == MetricKind::kCumulative) {
     *val = *val - data_memory_.StoreAndGetValue(metric_name, *uuid, *val);
   }
-  auto tagMap = GetTagMap(*uuid);
+  auto tagMap = GetTagMap(*uuid, correlator);
   opencensus::stats::Record({{ms_it->second, *val}}, tagMap);
   return absl::OkStatus();
 }
@@ -352,10 +370,13 @@ absl::Status OCGCPMetricExporter::CustomLabels(
 void OCGCPMetricExporter::Cleanup() {
   auto uuids = last_read_.GetUUID();
   for (const auto& uuid : uuids) {
-    if (!correlator_->CheckUUID(uuid)) {
-      last_read_.DeleteValue(uuid);
-      data_memory_.DeleteValue(uuid);
-      tag_maps_.erase(uuid);
+    for (auto& correlator : correlators_) {
+      if (!correlator->CheckUUID(uuid)) {
+        last_read_.DeleteValue(uuid);
+        data_memory_.DeleteValue(uuid);
+        tag_maps_.erase(uuid);
+        return;
+      }
     }
   }
 }

@@ -17,10 +17,11 @@
 
 #include <cstdint>
 #include <string>
+
 #include "absl/status/status.h"
-#include "absl/strings/string_view.h"
 #include "absl/status/statusor.h"
-#include "bpf/bpf.h"
+#include "absl/strings/string_view.h"
+#include "ebpf_monitor/utils/utils.h"
 #include "bpf/libbpf.h"
 
 namespace ebpf_monitor {
@@ -36,6 +37,7 @@ bool TestProgType(bpf_prog_type type);
 absl::StatusOr<uint32_t> GetKernelVersion();
 bool VmlinuxExists(void);
 absl::StatusOr<std::string> GetBtfFilePath();
+absl::StatusOr<SourceLanguage> DetectSourceLanguauge(int pid);
 
 class SourceExtractionHelper {
  public:

@@ -237,9 +237,12 @@ absl::StatusOr<std::string> GetLogString(
 
 absl::StatusOr<std::string> GetMetricString(
     absl::string_view name, absl::string_view uuid, const MetricDesc &desc,
-    const void *const key, const void *const value) {
+    const void *const key, const void *const value, uint64_t timestamp) {
+  std::string time_str = absl::FormatTime("%Y-%m-%d %H:%M:%S",
+                                          GetTimeFromBPFns(timestamp),
+                                          absl::LocalTimeZone());
   return absl::StrFormat(
-      "%s,%s,%s:%s%s", uuid, name, MetricValue(key, desc.key_type),
+      "%s,%s,%s,%s:%s%s", uuid, name, time_str, MetricValue(key, desc.key_type),
       MetricValue(value, desc.value_type), GetUnitString(desc.unit));
 }
 

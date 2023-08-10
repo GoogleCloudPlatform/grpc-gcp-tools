@@ -25,7 +25,7 @@ namespace ebpf_monitor {
 // File name is hardcoded with a relative location for now.
 // Will do something better later.
 MapSource::MapSource() {
-  log_sources_ = {std::make_shared<DataCtx>("h2_grpc_events", LogDesc{},
+  log_sources_ = {std::make_shared<DataCtx>("h2_events", LogDesc{},
                                             absl::Seconds(2), false, true)};
   metric_sources_ = {
       {std::make_shared<DataCtx>("h2_stream_count",
