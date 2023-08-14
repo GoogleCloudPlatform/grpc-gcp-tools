@@ -32,8 +32,8 @@ extern u32 LINUX_KERNEL_VERSION __kconfig;
   #define KERN_READ(dst, sz, src)   bpf_core_read(dst, sz, src)
 #endif
 
-//1 second
-#define SAMPLE_TIME   1000000000
+// 2 second
+#define SAMPLE_TIME   2000000000
 static __always_inline uint32_t get_curr_pid(void* map) {
   if (map == NULL) {
     return 0;
@@ -51,37 +51,37 @@ static __always_inline uint32_t get_curr_pid(void* map) {
 /* tcp_events is the buffer that is used to communicate events with userspace.
 For definition of different events please refer to events.h */
 struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u32));
+  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+  __uint(key_size, sizeof(__u32));
+  __uint(value_size, sizeof(__u32));
 } tcp_events SEC(".maps");
 
-/* tcp_pid_filter is a map of pids that the probe is supposed to trace */ 
+/* tcp_pid_filter is a map of pids that the probe is supposed to trace */
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u8));
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(key_size, sizeof(__u32));
+  __uint(value_size, sizeof(__u8));
   __uint(max_entries, MAX_PID_TRACED);
 } tcp_pid_filter SEC(".maps");
 
-/* tcp_connection is a map of connections. 
+/* tcp_connection is a map of connections.
 All the probes used have struct sock * as an argument in the raw tracepoint.
-We will use that as key. Value is the last sampled timestamp. 
-The timestamp value will be used in case of sampling congestion values.*/ 
+We will use that as key. Value is the last sampled timestamp.
+The timestamp value will be used in case of sampling congestion values.*/
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(__u64));
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(__u64));
   __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_connection SEC(".maps");
 
-/* tcp_retransmits is a map of connections. 
+/* tcp_retransmits is a map of connections.
 Retransmits corresponding to tcp connections.
-*/ 
+*/
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(__u32));
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(__u32));
   __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_retransmits SEC(".maps");
 
@@ -89,59 +89,59 @@ struct {
 using maps. The BPF_MAP_TYPE_PERCPU_ARRAY avoids contention and need for locks
 since the code will always run inline to the process thread.*/
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(ec_ebpf_events_t));
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(key_size, sizeof(__u32));
+  __uint(value_size, sizeof(ec_ebpf_events_t));
   __uint(max_entries, 1);
 } event_heap SEC(".maps");
 
-/* tcp_rtt is a map of connections. 
+/* tcp_rtt is a map of connections.
 Retransmits corresponding to tcp connections.
-*/ 
+*/
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
   __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_rtt SEC(".maps");
 
-/* tcp_snd_bytes is a map of connections. 
+/* tcp_snd_bytes is a map of connections.
 Retransmits corresponding to tcp connections.
-*/ 
+*/
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
   __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_snd_bytes SEC(".maps");
 
-/* tcp_rcv_bytes is a map of connections. 
+/* tcp_rcv_bytes is a map of connections.
 Retransmits corresponding to tcp connections.
-*/ 
+*/
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
   __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_rcv_bytes SEC(".maps");
 
-/* tcp_snd_cwnd is a map of connections. 
+/* tcp_snd_cwnd is a map of connections.
 Retransmits corresponding to tcp connections.
-*/ 
+*/
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
   __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_snd_cwnd SEC(".maps");
 
-/* tcp_rcv_cwnd is a map of connections. 
+/* tcp_rcv_cwnd is a map of connections.
 Receive window corresponding to tcp connections.
-*/ 
+*/
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
   __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_rcv_cwnd SEC(".maps");
 
@@ -160,15 +160,15 @@ static __always_inline ec_ebpf_events_t * get_event(uint32_t pid){
 
 static __always_inline void send_tcp_start(void * ctx,
                                 ec_ebpf_events_t * event,
-                                const struct sock * sk){  
+                                const struct sock * sk){
   uint64_t kZero = 0;
   const struct inet_sock *inet = inet_sk(sk);
   bpf_map_update_elem(&tcp_connection, &sk, &kZero, BPF_NOEXIST);
   event->mdata.event_type = EC_TCP_EVENT_START;
   ec_tcp_start_t * start = (ec_tcp_start_t*)event->event_info;
-  KERN_READ(&start->family,sizeof(uint16_t),&sk->__sk_common.skc_family);
-  KERN_READ(&start->sport,sizeof(uint16_t),&inet->inet_sport);
-  KERN_READ(&start->dport,sizeof(uint16_t),&sk->__sk_common.skc_dport);
+  KERN_READ(&start->family, sizeof(uint16_t), &sk->__sk_common.skc_family);
+  KERN_READ(&start->sport, sizeof(uint16_t), &inet->inet_sport);
+  KERN_READ(&start->dport, sizeof(uint16_t), &sk->__sk_common.skc_dport);
   start->dport = bpf_ntohs(start->dport);
   start->sport = bpf_ntohs(start->sport);
   if (start->family == AF_INET) {
@@ -189,7 +189,7 @@ static __always_inline void send_tcp_start(void * ctx,
 
 #define READ_TCP_METRIC_TO_MAP(map, metric)   \
   KERN_READ(&metric_value, sizeof(uint32_t), metric); \
-  format = bpf_map_lookup_elem(map,&sk); \
+  format = bpf_map_lookup_elem(map, &sk); \
   if (format == NULL){ \
     metric_format_t data = {.timestamp = timestamp, .data = metric_value}; \
     bpf_map_update_elem(map, &sk, &data, BPF_ANY); \
@@ -198,7 +198,8 @@ static __always_inline void send_tcp_start(void * ctx,
     format->data = metric_value; \
   }
 
-static __always_inline int handle_tcp(void * ctx, uint32_t pid, const struct sock * const sk) {
+static __always_inline int handle_tcp(void * ctx, uint32_t pid,
+                                      const struct sock * const sk) {
   uint64_t * value = bpf_map_lookup_elem(&tcp_connection, &sk);
   uint64_t timestamp = bpf_ktime_get_ns();
   if (value != NULL && ((timestamp - *value) < SAMPLE_TIME)) {
@@ -209,10 +210,9 @@ static __always_inline int handle_tcp(void * ctx, uint32_t pid, const struct soc
   if (event == NULL){
     return -1;
   }
-
   event->mdata.connection_id = (uint64_t) sk;
   if (value == NULL){
-    send_tcp_start(ctx,event,sk);
+    send_tcp_start(ctx, event, sk);
   } else {
     *value = timestamp;
   }
@@ -223,15 +223,16 @@ static __always_inline int handle_tcp(void * ctx, uint32_t pid, const struct soc
   uint32_t metric_value;
   metric_format_t * format;
 
-  READ_TCP_METRIC_TO_MAP(&tcp_rtt,&tcpi->srtt_us);
-  READ_TCP_METRIC_TO_MAP(&tcp_snd_cwnd,&tcpi->snd_cwnd);
-  READ_TCP_METRIC_TO_MAP(&tcp_rcv_cwnd,&tcpi->rcv_wnd);
-  READ_TCP_METRIC_TO_MAP(&tcp_rcv_bytes,&tcpi->bytes_received);
-  READ_TCP_METRIC_TO_MAP(&tcp_snd_bytes,&tcpi->bytes_acked);
+  READ_TCP_METRIC_TO_MAP(&tcp_rtt, &tcpi->srtt_us);
+  READ_TCP_METRIC_TO_MAP(&tcp_snd_cwnd, &tcpi->snd_cwnd);
+  READ_TCP_METRIC_TO_MAP(&tcp_rcv_cwnd, &tcpi->rcv_wnd);
+  READ_TCP_METRIC_TO_MAP(&tcp_rcv_bytes, &tcpi->bytes_received);
+  READ_TCP_METRIC_TO_MAP(&tcp_snd_bytes, &tcpi->bytes_acked);
 
   uint32_t retrans;
   KERN_READ(&retrans, sizeof(uint32_t), &tcpi->total_retrans);
-  uint32_t * retrans_map = (uint32_t*) bpf_map_lookup_elem(&tcp_retransmits, &sk);
+  uint32_t * retrans_map =
+      (uint32_t*) bpf_map_lookup_elem(&tcp_retransmits, &sk);
   if (retrans_map == NULL && retrans > 0) {
     bpf_map_update_elem(&tcp_retransmits, &sk, &retrans, BPF_ANY);
   } else if ((retrans_map != NULL) && ((*retrans_map) != retrans)) {
@@ -240,18 +241,15 @@ static __always_inline int handle_tcp(void * ctx, uint32_t pid, const struct soc
   return 0;
 }
 
-//int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+// int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 SEC("kprobe/tcp_sendmsg")
 int probe_tcp_sendmsg(struct pt_regs* ctx) {
   uint32_t pid = get_curr_pid(&tcp_pid_filter);
-  
   if (pid == 0){
     return 0;
   }
-
-  const struct sock * sk = (struct sock *) PT_REGS_PARM1(ctx); 
+  const struct sock * sk = (struct sock *) PT_REGS_PARM1(ctx);
   return handle_tcp(ctx, pid, sk);
-
 }
 
 SEC("kprobe/tcp_set_state")
@@ -262,7 +260,6 @@ int probe_tcp_set_state(struct pt_regs *ctx)
   if (value == NULL){
     return 0;
   }
-  
   uint32_t pid = get_curr_pid(&tcp_pid_filter);
   if (pid == 0){
     return 0;
@@ -275,9 +272,9 @@ int probe_tcp_set_state(struct pt_regs *ctx)
   }
 
   event->mdata.connection_id = (uint64_t) sk;
-  
   uint32_t old_state;
-  KERN_READ(&old_state, sizeof(uint32_t), (const void*)&sk->__sk_common.skc_state);
+  KERN_READ(&old_state, sizeof(uint32_t),
+            (const void*)&sk->__sk_common.skc_state);
 
   ec_tcp_state_change_t * ev = (ec_tcp_state_change_t*)event->event_info;
   event->mdata.event_type = EC_TCP_EVENT_STATE_CHANGE;

@@ -33,14 +33,14 @@ extern u32 LINUX_KERNEL_VERSION __kconfig;
   #define KERN_READ(dst, sz, src)   bpf_core_read(dst, sz, src)
 #endif
 
-//1 second
+// 2 second
 #define SAMPLE_TIME   2000000000
 
 /* tcp_pid_filter is a map of pids that the probe is supposed to trace */
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u8));
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(key_size, sizeof(__u32));
+  __uint(value_size, sizeof(__u8));
   __uint(max_entries, MAX_PID_TRACED);
 } tcp_pid_filter SEC(".maps");
 
@@ -59,89 +59,90 @@ struct tcp_conn_t {
 };
 
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(struct tcp_conn_t));
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(struct tcp_conn_t));
   __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_connection SEC(".maps");
 
 /* tcp_events is the buffer that is used to communicate events with userspace.
 For definition of different events please refer to events.h */
 struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u32));
+  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+  __uint(key_size, sizeof(__u32));
+  __uint(value_size, sizeof(__u32));
 } tcp_events SEC(".maps");
 
 /* tcp_retransmits is a map of connections.
 Retransmits corresponding to tcp connections.
 */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
-	__uint(max_entries, MAX_TCP_CONN_TRACED);
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
+  __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_retransmits SEC(".maps");
 
 /* tcp_rtt is a map of connections.
 Round trip latency corresponding to tcp connections.
 */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
-  	__uint(max_entries, MAX_TCP_CONN_TRACED);
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
+  __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_rtt SEC(".maps");
 
 /* tcp_snd_bytes is a map of connections.
 No. of bytes acked corresponding to tcp connections.
 */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
-  	__uint(max_entries, MAX_TCP_CONN_TRACED);
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
+  __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_snd_bytes SEC(".maps");
 
 /* tcp_rcv_bytes is a map of connections.
 Num of bytes read corresponding to tcp connections.
 */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
-  	__uint(max_entries, MAX_TCP_CONN_TRACED);
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
+  __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_rcv_bytes SEC(".maps");
 
 /* tcp_snd_cwnd is a map of connections.
 Send window size corresponding to tcp connections.
 */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
-  	__uint(max_entries, MAX_TCP_CONN_TRACED);
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
+  __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_snd_cwnd SEC(".maps");
 
 /* tcp_rcv_cwnd is a map of connections.
 Receive window corresponding to tcp connections.
 */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(metric_format_t));
-  	__uint(max_entries, MAX_TCP_CONN_TRACED);
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(metric_format_t));
+  __uint(max_entries, MAX_TCP_CONN_TRACED);
 } tcp_rcv_cwnd SEC(".maps");
 
 /* Because of limited stack space in eBPF we usually store variables on heap
 using maps. The BPF_MAP_TYPE_PERCPU_ARRAY avoids contention and need for locks
 since the code will always run inline to the process thread.*/
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(ec_ebpf_events_t));
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(key_size, sizeof(__u32));
+  __uint(value_size, sizeof(ec_ebpf_events_t));
   __uint(max_entries, 1);
 } event_heap SEC(".maps");
+
 static __always_inline uint32_t get_curr_pid() {
   uint32_t ppid = (bpf_get_current_pid_tgid() >> 32);
   uint8_t* trace_pid = bpf_map_lookup_elem(&tcp_pid_filter, &ppid);
@@ -167,17 +168,17 @@ static __always_inline ec_ebpf_events_t * get_event(uint32_t pid){
 static __always_inline void send_tcp_start(void * ctx,
                                 ec_ebpf_events_t * event,
                                 const struct sock * sk){
-  metric_format_t format = {.data =0, .timestamp = event->mdata.timestamp};
-  bpf_map_update_elem(&tcp_retransmits,&sk,
+  metric_format_t format = {.data = 0, .timestamp = event->mdata.timestamp};
+  bpf_map_update_elem(&tcp_retransmits, &sk,
                       &format, BPF_ANY);
   const struct inet_sock *inet = inet_sk(sk);
   struct tcp_conn_t conn_info = {.timestamp = 0, .pid = event->mdata.pid};
   bpf_map_update_elem(&tcp_connection, &sk, &conn_info, BPF_NOEXIST);
   event->mdata.event_type = EC_TCP_EVENT_START;
   ec_tcp_start_t * start = (ec_tcp_start_t*)event->event_info;
-  KERN_READ(&start->family,sizeof(uint16_t),&sk->__sk_common.skc_family);
-  KERN_READ(&start->sport,sizeof(uint16_t),&inet->inet_sport);
-  KERN_READ(&start->dport,sizeof(uint16_t),&sk->__sk_common.skc_dport);
+  KERN_READ(&start->family, sizeof(uint16_t), &sk->__sk_common.skc_family);
+  KERN_READ(&start->sport, sizeof(uint16_t), &inet->inet_sport);
+  KERN_READ(&start->dport, sizeof(uint16_t), &sk->__sk_common.skc_dport);
   start->dport = bpf_ntohs(start->dport);
   start->sport = bpf_ntohs(start->sport);
   if (start->family == AF_INET) {
@@ -215,20 +216,20 @@ int sock_state(struct bpf_raw_tracepoint_args *ctx)
     bpf_map_delete_elem(&tcp_connection, &sk);
   }
   #ifndef CORE
-  #if (LINUX_VERSION_CODE < KERNEL_VERSION(5,6,0))
+  #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 6, 0))
     uint8_t proto;
-    KERN_READ(&proto, 1,(uint8_t*)(((void *) &(sk->sk_gso_max_segs)) - 3));
+    KERN_READ(&proto, 1, (uint8_t*)(((void *) &(sk->sk_gso_max_segs)) - 3));
     protocol = proto;
   #else
-    KERN_READ(&protocol,sizeof(uint16_t),&(sk->sk_protocol));
+    KERN_READ(&protocol, sizeof(uint16_t), &(sk->sk_protocol));
   #endif
   #else
   if (bpf_core_field_exists(struct sock___old, __sk_flags_offset)) {
     uint8_t proto;
-    KERN_READ(&proto, 1,(uint8_t*)(((void *) &(sk->sk_gso_max_segs)) - 3));
+    KERN_READ(&proto, 1, (uint8_t*)(((void *) &(sk->sk_gso_max_segs)) - 3));
     protocol = proto;
   } else {
-    KERN_READ(&protocol,sizeof(uint16_t),&(sk->sk_protocol));
+    KERN_READ(&protocol, sizeof(uint16_t), &(sk->sk_protocol));
   }
   #endif
 
@@ -254,7 +255,7 @@ int sock_state(struct bpf_raw_tracepoint_args *ctx)
 
 #define READ_TCP_METRIC_TO_MAP(map, metric)   \
   KERN_READ(&metric_value, sizeof(uint32_t), metric); \
-  format = bpf_map_lookup_elem(map,&sk); \
+  format = bpf_map_lookup_elem(map, &sk); \
   if (format == NULL){ \
     metric_format_t data = {.timestamp = timestamp, .data = metric_value}; \
     bpf_map_update_elem(map, &sk, &data, BPF_ANY); \
@@ -263,7 +264,8 @@ int sock_state(struct bpf_raw_tracepoint_args *ctx)
     format->data = metric_value; \
   }
 
-static __always_inline int handle_tcp(void * ctx, uint32_t pid, const struct sock * const sk) {
+static __always_inline int handle_tcp(void * ctx, uint32_t pid,
+    const struct sock * const sk) {
   struct tcp_conn_t * value = bpf_map_lookup_elem(&tcp_connection, &sk);
   uint64_t timestamp = bpf_ktime_get_ns();
   if (value != NULL && ((timestamp - value->timestamp) < SAMPLE_TIME)) {
@@ -276,7 +278,7 @@ static __always_inline int handle_tcp(void * ctx, uint32_t pid, const struct soc
   }
   event->mdata.connection_id = (uint64_t) sk;
   if (value == NULL){
-    send_tcp_start(ctx,event,sk);
+    send_tcp_start(ctx, event, sk);
   } else {
     value->timestamp = timestamp;
   }
@@ -286,20 +288,20 @@ static __always_inline int handle_tcp(void * ctx, uint32_t pid, const struct soc
   uint32_t metric_value;
   metric_format_t * format;
 
-  KERN_READ(&metric_value, sizeof(uint32_t), &tcpi->srtt_us); 
-  format = bpf_map_lookup_elem(&tcp_rtt,&sk); 
-  if (format == NULL){ 
-    metric_format_t data = {.timestamp = timestamp, .data = metric_value >> 3}; 
-    bpf_map_update_elem(&tcp_rtt, &sk, &data, BPF_ANY); 
+  KERN_READ(&metric_value, sizeof(uint32_t), &tcpi->srtt_us);
+  format = bpf_map_lookup_elem(&tcp_rtt, &sk);
+  if (format == NULL){
+    metric_format_t data = {.timestamp = timestamp, .data = metric_value >> 3};
+    bpf_map_update_elem(&tcp_rtt, &sk, &data, BPF_ANY);
   } else {
     format->timestamp = timestamp;
     format->data = metric_value >> 3;
   }
 
-  READ_TCP_METRIC_TO_MAP(&tcp_snd_cwnd,&tcpi->snd_cwnd);
-  READ_TCP_METRIC_TO_MAP(&tcp_rcv_cwnd,&tcpi->rcv_wnd);
-  READ_TCP_METRIC_TO_MAP(&tcp_rcv_bytes,&tcpi->bytes_received);
-  READ_TCP_METRIC_TO_MAP(&tcp_snd_bytes,&tcpi->bytes_acked);
+  READ_TCP_METRIC_TO_MAP(&tcp_snd_cwnd, &tcpi->snd_cwnd);
+  READ_TCP_METRIC_TO_MAP(&tcp_rcv_cwnd, &tcpi->rcv_wnd);
+  READ_TCP_METRIC_TO_MAP(&tcp_rcv_bytes, &tcpi->bytes_received);
+  READ_TCP_METRIC_TO_MAP(&tcp_snd_bytes, &tcpi->bytes_acked);
   return 0;
 }
 /*
@@ -318,14 +320,14 @@ int tcp_congestion(struct bpf_raw_tracepoint_args *ctx)
   return handle_tcp(ctx, value->pid, sk);
 }
 
-//int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+// int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 SEC("kprobe/tcp_sendmsg")
 int probe_tcp_sendmsg(struct pt_regs* ctx) {
   uint32_t pid = get_curr_pid();
   if (pid == 0){
     return 0;
   }
-  const struct sock * sk = (struct sock *) PT_REGS_PARM1(ctx); 
+  const struct sock * sk = (struct sock *) PT_REGS_PARM1(ctx);
   return handle_tcp(ctx, pid, sk);
 }
 
@@ -346,18 +348,19 @@ int tcp_retransmit(struct bpf_raw_tracepoint_args *ctx)
 {
   const struct sock * sk = (const struct sock *)ctx->args[0];
 
-  uint64_t * value = bpf_map_lookup_elem(&tcp_connection,&sk);
+  uint64_t * value = bpf_map_lookup_elem(&tcp_connection, &sk);
   if (value == NULL){
     return 0;
   }
 
   struct tcp_sock *tcpi = tcp_sk(sk);
   uint32_t retransmit;
-  KERN_READ(&retransmit,sizeof(uint32_t),&tcpi->total_retrans);
-  metric_format_t format = {.timestamp =  bpf_ktime_get_ns(),.data=retransmit};
-  metric_format_t * retrans_value = bpf_map_lookup_elem(&tcp_retransmits,&sk);
+  KERN_READ(&retransmit, sizeof(uint32_t), &tcpi->total_retrans);
+  metric_format_t format = {.timestamp =  bpf_ktime_get_ns(),
+                            .data = retransmit};
+  metric_format_t * retrans_value = bpf_map_lookup_elem(&tcp_retransmits, &sk);
   if (retrans_value == NULL){
-    bpf_map_update_elem(&tcp_retransmits,&sk,&format,BPF_ANY);
+    bpf_map_update_elem(&tcp_retransmits, &sk, &format, BPF_ANY);
   } else {
     *retrans_value = format;
   }
@@ -368,7 +371,6 @@ int tcp_retransmit(struct bpf_raw_tracepoint_args *ctx)
 static __always_inline int tcp_reset_event(struct bpf_raw_tracepoint_args *ctx,
                                     int send_recv){
   const struct sock * sk = (const struct sock *)ctx->args[0];
-  
   struct tcp_conn_t * value = bpf_map_lookup_elem(&tcp_connection, &sk);
   if (value == NULL){
     return 0;
@@ -393,7 +395,7 @@ TP_PROTO(struct sock *sk, struct sk_buff *skb),
 SEC("raw_tracepoint/tcp_send_reset")
 int tcp_send_reset(struct bpf_raw_tracepoint_args *ctx)
 {
-  return tcp_reset_event(ctx,0);
+  return tcp_reset_event(ctx, 0);
 }
 
 /*
@@ -403,7 +405,7 @@ TP_PROTO(struct sock *sk, struct sk_buff *skb),
 SEC("raw_tracepoint/tcp_receive_reset")
 int tcp_receive_reset(struct bpf_raw_tracepoint_args *ctx)
 {
-  return tcp_reset_event(ctx,1);
+  return tcp_reset_event(ctx, 1);
 }
 
 char LICENSE[] SEC("license") = "GPL";

@@ -35,7 +35,8 @@ absl::StatusOr<std::string> GetMetricString(absl::string_view name,
                                                     absl::string_view uuid,
                                                     const MetricDesc& desc,
                                                     const void* const key,
-                                                    const void* const value);
+                                                    const void* const value,
+                                                    uint64_t timestamp);
 absl::Time GetLogTime(absl::string_view log_name,
                               const void* const data);
 absl::Time GetTimeFromBPFns(uint64_t timestamp);

@@ -94,7 +94,7 @@ absl::StatusOr<int> ElfReader::CheckSection(
   Elf_Data *data = nullptr;
   GElf_Shdr header;
 
-  int count = 0;
+  uint32_t count = 0;
 
   if (!gelf_getshdr(section, &header))
     return absl::InternalError("Invalid section");

@@ -21,7 +21,7 @@ struct {
   __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
   __uint(key_size, sizeof(__u32));
   __uint(value_size, sizeof(__u32));
-} h2_grpc_events SEC(".maps");
+} h2_events SEC(".maps");
 
 /* h2_connection is a map of connections. The value is bumped every
 time a frame is received to make sure the active connections are stored. */

@@ -39,9 +39,10 @@ class DataManager {
   void AddExternalLogHandler(LogHandlerInterface *log_handler);
   void AddExternalMetricHandler(MetricHandlerInterface *metric_handler);
   absl::Status AddLogHandler(absl::string_view name,
-                             LogHandlerInterface *log_handler);
-  absl::Status AddMetricHandler(absl::string_view name,
-                                MetricHandlerInterface *metric_handler);
+                             std::shared_ptr<LogHandlerInterface> log_handler);
+  absl::Status AddMetricHandler(
+      absl::string_view name,
+      std::shared_ptr<MetricHandlerInterface> metric_handler);
 
  private:
   struct DataManagerCtx {
@@ -57,9 +58,11 @@ class DataManager {
   static void HandleCleanup(evutil_socket_t, short, void *arg);  // NOLINT
   absl::flat_hash_map<std::string, std::shared_ptr<DataCtx>> data_sources_;
   absl::flat_hash_map<std::string, bool> registered_sources_;
-  absl::flat_hash_map<std::string, std::vector<LogHandlerInterface *>>
+  absl::flat_hash_map<std::string,
+                      std::vector<std::shared_ptr<LogHandlerInterface>>>
       log_handlers_;
-  absl::flat_hash_map<std::string, std::vector<MetricHandlerInterface *>>
+  absl::flat_hash_map<std::string,
+                      std::vector<std::shared_ptr<MetricHandlerInterface>>>
       metric_handlers_;
   std::vector<MetricHandlerInterface *> ext_metric_handlers_;
   std::vector<LogHandlerInterface *> ext_log_handlers_;

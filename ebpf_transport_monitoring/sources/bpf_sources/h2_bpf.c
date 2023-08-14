@@ -22,25 +22,25 @@ typedef const h2_cfg_t config_type_t;
 
 /* h2_grpc_pid_filter is a map of pids that the probe is supposed to trace */
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u8));
-    __uint(max_entries, MAX_PID_TRACED);
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(key_size, sizeof(__u32));
+  __uint(value_size, sizeof(__u8));
+  __uint(max_entries, MAX_PID_TRACED);
 } h2_grpc_pid_filter SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(h2_cfg_t));
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(h2_cfg_t));
   __uint(max_entries, MAX_PID_TRACED);
 } h2_cfg SEC(".maps");
 
 /* h2_grpc_correlation is the buffer that is used to communicate events with
 userspace for correlation related information.*/
 struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u32));
+  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+  __uint(key_size, sizeof(__u32));
+  __uint(value_size, sizeof(__u32));
 } h2_grpc_correlation SEC(".maps");
 
 struct h2_conn_info{
@@ -50,16 +50,16 @@ struct h2_conn_info{
 
 /* This struct keeps track of bufWriter to H2Connection */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(struct h2_conn_info));
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(key_size, sizeof(__u64));
+  __uint(value_size, sizeof(struct h2_conn_info));
   __uint(max_entries, MAX_H2_CONN_TRACED);
 } buff_writer_to_h2_conn SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(correlator_ip_t));
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(key_size, sizeof(__u32));
+  __uint(value_size, sizeof(correlator_ip_t));
   __uint(max_entries, 1);
 } h2_cip_heap SEC(".maps");
 
@@ -89,9 +89,9 @@ static __always_inline ec_ebpf_events_t * get_event(uint32_t pid){
 }
 
 static __always_inline int get_tcp_tuple_from_h2_conn(void * ctx,
-                                                     config_type_t * configuration,
-                                                      void * h2_conn,
-                                                      __u8 client){
+                                                config_type_t * configuration,
+                                                void * h2_conn,
+                                                __u8 client){
   struct go_interface g_laddr, g_raddr;
   struct go_slice ip;
   int port;
@@ -110,10 +110,10 @@ static __always_inline int get_tcp_tuple_from_h2_conn(void * ctx,
     raddr = configuration->offset.server_raddr;
   }
 
-  REQUIRE_MEM_VAR(configuration->offset.tcp_ip,ip);
-  REQUIRE_MEM_VAR(configuration->offset.tcp_port,port);
+  REQUIRE_MEM_VAR(configuration->offset.tcp_ip, ip);
+  REQUIRE_MEM_VAR(configuration->offset.tcp_port, port);
 
-  long success = READ_MEMBER(h2_conn, laddr, &g_laddr);
+  int64_t success = READ_MEMBER(h2_conn, laddr, &g_laddr);
   if (success < 0 || g_laddr.ptr == NULL) {
     return 0;
   }
@@ -174,32 +174,33 @@ static __always_inline int get_tcp_tuple_from_h2_conn(void * ctx,
     bpf_probe_read(&cip->raddr, length, ip.ptr);
   }
 
-  bpf_perf_event_output(ctx, &h2_grpc_correlation, BPF_F_CURRENT_CPU, cip, sizeof(correlator_ip_t));
+  bpf_perf_event_output(ctx, &h2_grpc_correlation, BPF_F_CURRENT_CPU,
+                        cip, sizeof(correlator_ip_t));
   return 0;
 }
 
 static __always_inline int send_h2_start(void * ctx,
-				                        config_type_t * configuration,
-                                ec_ebpf_events_t * event,
-                                void * h2_conn,
-                                __u8 client){
-  metric_format_t format = {.data =0, .timestamp = event->mdata.timestamp};
+                                        config_type_t * configuration,
+                                        ec_ebpf_events_t * event,
+                                        void * h2_conn,
+                                        __u8 client){
+  metric_format_t format = {.data = 0, .timestamp = event->mdata.timestamp};
   event->mdata.length = 0;
   event->mdata.event_type = EC_H2_EVENT_START;
   uint64_t conn_id = event->mdata.connection_id;
   uint64_t timestamp = event->mdata.timestamp;
-  bpf_map_update_elem(&h2_connection,&conn_id,
+  bpf_map_update_elem(&h2_connection, &conn_id,
                       &timestamp, BPF_ANY);
-  bpf_map_update_elem(&h2_stream_count,&conn_id,
+  bpf_map_update_elem(&h2_stream_count, &conn_id,
                       &format, BPF_ANY);
-  bpf_map_update_elem(&h2_reset_stream_count,&conn_id,
+  bpf_map_update_elem(&h2_reset_stream_count, &conn_id,
                       &format, BPF_ANY);
-  bpf_perf_event_output(ctx, &h2_grpc_events, BPF_F_CURRENT_CPU, event,
+  bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU, event,
                         sizeof(ec_ebpf_event_metadata_t) + 0);
 
   void * framer_ptr = 0;
   if (client) {
-    REQUIRE_MEM_VAR(configuration->offset.client_framer,framer_ptr);
+    REQUIRE_MEM_VAR(configuration->offset.client_framer, framer_ptr);
     READ_MEMBER(h2_conn, configuration->offset.client_framer, &framer_ptr);
   } else {
     REQUIRE_MEM_VAR(configuration->offset.server_framer, framer_ptr);
@@ -217,10 +218,10 @@ static __always_inline int send_h2_start(void * ctx,
   REQUIRE_MEM_VAR(configuration->offset.framer_bufwriter, buffer_ptr);
   READ_MEMBER(framer_ptr, configuration->offset.framer_bufwriter,
                 &buffer_ptr);
-  //This can cause a collision in case we are tracking multiple PIDs.
+  // This can cause a collision in case we are tracking multiple PIDs.
   // Not handling for now.
   struct h2_conn_info conn_info;
-   __builtin_memset(&conn_info, 0, sizeof(struct h2_conn_info));
+  __builtin_memset(&conn_info, 0, sizeof(struct h2_conn_info));
   conn_info.conn_id = conn_id;
   conn_info.client = client;
   bpf_map_update_elem(&buff_writer_to_h2_conn, &buffer_ptr,
@@ -230,33 +231,34 @@ static __always_inline int send_h2_start(void * ctx,
 
 
 static __always_inline int send_h2_go_away (void * ctx,
-	                                   config_type_t * configuration,
+                                     config_type_t * configuration,
                                      ec_ebpf_events_t * event,
                                      void * frame_ptr){
   ec_h2_go_away_t * data = (ec_h2_go_away_t*)event->event_info;
-  REQUIRE_MEM_VAR(configuration->offset.goawayframe_stream,data->last_stream_id);
+  REQUIRE_MEM_VAR(configuration->offset.goawayframe_stream,
+                  data->last_stream_id);
   READ_MEMBER(frame_ptr, configuration->offset.goawayframe_stream,
               &data->last_stream_id);
-  REQUIRE_MEM_VAR(configuration->offset.goawayframe_error,data->error_code);
+  REQUIRE_MEM_VAR(configuration->offset.goawayframe_error, data->error_code);
   READ_MEMBER(frame_ptr, configuration->offset.goawayframe_error,
               &data->error_code);
   event->mdata.event_type = EC_H2_EVENT_GO_AWAY;
   event->mdata.length = sizeof(ec_h2_go_away_t);
 
-  bpf_perf_event_output(ctx, &h2_grpc_events, BPF_F_CURRENT_CPU, event,
+  bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU, event,
                         sizeof(ec_ebpf_event_metadata_t) +
                         sizeof(ec_h2_go_away_t));
   return 0;
 }
 
 static __always_inline int send_h2_settings (void * ctx,
-		                                  config_type_t * configuration,
+                                      config_type_t * configuration,
                                       ec_ebpf_events_t * event,
-                                      void * frame_ptr){                               
+                                      void * frame_ptr){
   struct go_slice slice;
   char * settings = (char *)event->event_info;
-  REQUIRE_MEM_VAR(configuration->offset.settingsframe_data,slice);
-  long success = bpf_probe_read(&slice,sizeof(slice),frame_ptr +
+  REQUIRE_MEM_VAR(configuration->offset.settingsframe_data, slice);
+  int64_t success = bpf_probe_read(&slice, sizeof(slice), frame_ptr +
                  configuration->offset.settingsframe_data.offset);
   if (unlikely((success < 0 || slice.len < 0 || slice.ptr == NULL))) {
     return 0;
@@ -267,13 +269,13 @@ static __always_inline int send_h2_settings (void * ctx,
   length = length_minus_1 + 1;
 
   if (likely(length_minus_1 < EC_MAX_EVENT_DATA_SIZE)) {
-    bpf_probe_read(settings,(uint32_t) length, slice.ptr);
+    bpf_probe_read(settings, (uint32_t) length, slice.ptr);
     event->mdata.event_type = EC_H2_EVENT_SETTINGS;
     uint64_t data_length = length + sizeof(ec_ebpf_event_metadata_t);
     if (unlikely(data_length > sizeof(ec_ebpf_events_t))){
       data_length = sizeof(ec_ebpf_events_t);
     }
-    bpf_perf_event_output(ctx, &h2_grpc_events, BPF_F_CURRENT_CPU,
+    bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU,
                           event, data_length);
   }
   return 0;
@@ -307,7 +309,7 @@ static __always_inline int collect_data(__u8 client, struct pt_regs* ctx) {
   }
 
   void* conn_ptr = 0;
-  long success = 0;
+  int64_t success = 0;
   success = read_variable(&conn_ptr, sizeof(conn_ptr),
                 &configuration->variables.connection, sp, regs);
 
@@ -331,14 +333,15 @@ static __always_inline int collect_data(__u8 client, struct pt_regs* ctx) {
     *value = timestamp;
   }
   uint8_t type;
-  REQUIRE_MEM_VAR(configuration->offset.frameheader_type,type);
-  success = READ_MEMBER(frame_ptr,configuration->offset.frameheader_type,&type);
+  REQUIRE_MEM_VAR(configuration->offset.frameheader_type, type);
+  success = READ_MEMBER(frame_ptr,
+                      configuration->offset.frameheader_type, &type);
   if (unlikely(success < 0)){
     return -1;
   }
 
   uint32_t stream_id;
-  REQUIRE_MEM_VAR(configuration->offset.frameheader_streamid,stream_id);
+  REQUIRE_MEM_VAR(configuration->offset.frameheader_streamid, stream_id);
   success = READ_MEMBER(frame_ptr,
                         configuration->offset.frameheader_streamid,
                         &stream_id);
@@ -346,7 +349,7 @@ static __always_inline int collect_data(__u8 client, struct pt_regs* ctx) {
     return -1;
   }
 
-  switch(type) {
+  switch (type) {
     case H2_RST_STREAM: {
       uint32_t error = 0;
       REQUIRE_MEM_VAR(configuration->offset.rstframe_error, error);
@@ -359,17 +362,17 @@ static __always_inline int collect_data(__u8 client, struct pt_regs* ctx) {
       break;
     }
     case H2_SETTINGS:
-      send_h2_settings(ctx,configuration,event,frame_ptr);
+      send_h2_settings(ctx, configuration, event, frame_ptr);
       break;
     case H2_PING:
-      //send_h2_ping(ctx,configuration,event,frame_ptr);
+      // send_h2_ping(ctx, configuration, event, frame_ptr);
       return 0;
     case H2_GOAWAY:
-      send_h2_go_away(ctx,configuration,event,frame_ptr);
+      send_h2_go_away(ctx, configuration, event, frame_ptr);
       return 0;
 
     case H2_WINDOW_UPDATE:
-      //send_h2_window_update(ctx,event,frame_ptr);
+      // send_h2_window_update(ctx, event, frame_ptr);
       return 0;
     case H2_DATA:
     default:
@@ -378,7 +381,7 @@ static __always_inline int collect_data(__u8 client, struct pt_regs* ctx) {
 
   uint8_t flag;
   REQUIRE_MEM_VAR(configuration->offset.frameheader_flags, flag);
-  READ_MEMBER(frame_ptr,configuration->offset.frameheader_flags,&flag);
+  READ_MEMBER(frame_ptr, configuration->offset.frameheader_flags, &flag);
 
   if ((flag & H2_END_STREAM) != 0){
     send_h2_end(ctx, event, stream_id);
@@ -387,7 +390,8 @@ static __always_inline int collect_data(__u8 client, struct pt_regs* ctx) {
   return 0;
 }
 
-static __always_inline int collect_header_data(__u8 client, struct pt_regs* ctx){
+static __always_inline int collect_header_data(__u8 client,
+                                               struct pt_regs* ctx){
   uint32_t pid = get_curr_pid();
   if (pid == 0){
     return 0;
@@ -414,7 +418,7 @@ static __always_inline int collect_header_data(__u8 client, struct pt_regs* ctx)
   }
 
   void * conn_ptr = 0;
-  long success = 0;
+  int64_t success = 0;
   success = read_variable(&conn_ptr, sizeof(conn_ptr),
                 &configuration->variables.connection, sp, regs);
   if (unlikely(success < 0)){
@@ -429,12 +433,12 @@ static __always_inline int collect_header_data(__u8 client, struct pt_regs* ctx)
   }
 
   void * frame_ptr = 0;
-  success = bpf_probe_read(&frame_ptr,sizeof(frame_ptr),meta_header_frame);
+  success = bpf_probe_read(&frame_ptr, sizeof(frame_ptr), meta_header_frame);
   if (unlikely(success < 0)){
     return -1;
   }
 
-  uint64_t *value = bpf_map_lookup_elem(&h2_connection,&conn_ptr);
+  uint64_t *value = bpf_map_lookup_elem(&h2_connection, &conn_ptr);
   event->mdata.connection_id = (uint64_t) conn_ptr;
   if (unlikely(value == NULL)){
     send_h2_start(ctx, configuration, event, conn_ptr, client);
@@ -444,17 +448,17 @@ static __always_inline int collect_header_data(__u8 client, struct pt_regs* ctx)
   }
 
   uint32_t stream_id;
-  REQUIRE_MEM_VAR(configuration->offset.frameheader_streamid,stream_id);
+  REQUIRE_MEM_VAR(configuration->offset.frameheader_streamid, stream_id);
   READ_MEMBER(frame_ptr, configuration->offset.frameheader_streamid,
             &stream_id);
-  //In case of client we capture start of sending stream on send side.
+  // In case of client we capture start of sending stream on send side.
   if (client == 0) {
     send_h2_headers(ctx, event, stream_id);
   }
 
   uint8_t flag;
-  REQUIRE_MEM_VAR(configuration->offset.frameheader_flags,flag);
-  READ_MEMBER(frame_ptr,configuration->offset.frameheader_flags,&flag);
+  REQUIRE_MEM_VAR(configuration->offset.frameheader_flags, flag);
+  READ_MEMBER(frame_ptr, configuration->offset.frameheader_flags, &flag);
   if ((flag & H2_END_STREAM) != 0){
     send_h2_end(ctx, event, stream_id);
   }
@@ -462,7 +466,6 @@ static __always_inline int collect_header_data(__u8 client, struct pt_regs* ctx)
 }
 
 static int __always_inline process_frame(struct pt_regs* ctx) {
-
   uint32_t pid = get_curr_pid();
   if (pid == 0){
     return 0;
@@ -490,7 +493,7 @@ static int __always_inline process_frame(struct pt_regs* ctx) {
     return 0;
   }
   void * buf_writer = 0;
-  long success = 0;
+  int64_t success = 0;
   success = read_variable(&buf_writer, sizeof(buf_writer),
                 &configuration->variables.buf_writer, sp, regs);
   if (unlikely(success != 0)) {
@@ -512,13 +515,15 @@ static int __always_inline process_frame(struct pt_regs* ctx) {
   if (unlikely(success  < 0)){
     return success;
   }
-  // What do you do if you don't have connection pointer corresponding to 
-  // h2 connection. This should ideally only happen if client has not received any
-  // message from this connection. Settings frame could be missed in this case.
+  // What do you do if you don't have connection pointer corresponding to
+  // h2 connection. This should ideally only happen if client has not received
+  // any message from this connection.
+  // Settings frame could be missed in this case.
 
-  struct h2_conn_info * h2_connection = bpf_map_lookup_elem(&buff_writer_to_h2_conn, &buf_writer);
+  struct h2_conn_info * h2_connection =
+      bpf_map_lookup_elem(&buff_writer_to_h2_conn, &buf_writer);
   if (h2_connection == NULL) {
-    //Figure out what to do, return for now.
+    // Figure out what to do, return for now.
     return 0;
   } else {
     event->mdata.connection_id = h2_connection->conn_id;
@@ -539,17 +544,17 @@ int probe_handle_server_data(struct pt_regs* ctx) {
 
 SEC("uprobe/h2_client_probe")
 int probe_handle_client_data(struct pt_regs* ctx) {
- return collect_data(TRUE, ctx);
+  return collect_data(TRUE, ctx);
 }
 
 SEC("uprobe/h2_server_header_probe")
 int probe_handle_server_header(struct pt_regs* ctx) {
- return collect_header_data(FALSE,ctx);
+  return collect_header_data(FALSE, ctx);
 }
 
 SEC("uprobe/h2_server_header_probe")
 int probe_handle_client_header(struct pt_regs* ctx) {
-  return collect_header_data(TRUE,ctx);
+  return collect_header_data(TRUE, ctx);
 }
 
 /* Note it is possible that we cannot find a corresponding h2 connection id for
@@ -588,7 +593,7 @@ int probe_close(struct pt_regs* ctx){
   }
 
   void* conn_ptr = 0;
-  long success = 0;
+  int64_t success = 0;
   success = read_variable(&conn_ptr, sizeof(conn_ptr),
                 &configuration->variables.connection, sp, regs);
   if (unlikely(success < 0)){
@@ -604,7 +609,7 @@ int probe_close(struct pt_regs* ctx){
 
   event->mdata.length = 0;
   event->mdata.event_type = EC_H2_EVENT_CLOSE;
-  bpf_perf_event_output(ctx, &h2_grpc_events, BPF_F_CURRENT_CPU, event,
+  bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU, event,
                               sizeof(ec_ebpf_event_metadata_t));
   return 0;
 }

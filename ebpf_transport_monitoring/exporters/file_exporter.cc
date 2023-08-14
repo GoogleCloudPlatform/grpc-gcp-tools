@@ -65,9 +65,15 @@ absl::Status FileLogger::HandleData(absl::string_view log_name,
     return absl::NotFoundError("log not registered");
   }
   auto conn_id = GetLogConnId(log_name, data);
-  auto uuid = correlator_->GetUUID(conn_id);
+  absl::StatusOr<std::string> uuid;
+  for (auto& correlator : correlators_) {
+    uuid = correlator->GetUUID(conn_id);
+    if (uuid.ok()) {
+      break;
+    }
+  }
   if (!uuid.ok()) {
-    return absl::OkStatus();
+      return absl::OkStatus();
   }
   auto log_data = GetLogString(log_name, *uuid, data);
   if (!log_data.ok()) {
@@ -118,15 +124,21 @@ absl::Status FileMetricExporter::HandleData(absl::string_view metric_name,
     return absl::NotFoundError("metric_name not found");
   }
   metric_format_t* metric = (metric_format_t*)value;
-  auto uuid = correlator_->GetUUID(*(uint64_t*)key);
+  absl::StatusOr<std::string> uuid;
+  for (auto& correlator : correlators_) {
+    uuid = correlator->GetUUID(*(uint64_t*)key);
+    if (uuid.ok()) {
+      break;
+    }
+  }
   if (!uuid.ok()) {
-    return absl::OkStatus();
+      return absl::OkStatus();
   }
   if (!last_read_.CheckMetricTime(metric_name, *uuid, metric->timestamp).ok()) {
     return absl::OkStatus();
   }
   auto metric_str = GetMetricString(
-      metric_name, *uuid, it->second, key, &(metric->data));
+      metric_name, *uuid, it->second, key, &(metric->data), metric->timestamp);
   if (!metric_str.ok()) {
     return metric_str.status();
   }
@@ -141,8 +153,11 @@ absl::Status FileMetricExporter::HandleData(absl::string_view metric_name,
 void FileMetricExporter::Cleanup() {
   auto uuids = last_read_.GetUUID();
   for (const auto& uuid : uuids) {
-    if (!correlator_->CheckUUID(uuid)) {
-      last_read_.DeleteValue(uuid);
+    for (auto& correlator : correlators_) {
+      if (!correlator->CheckUUID(uuid)) {
+        last_read_.DeleteValue(uuid);
+        return;
+      }
     }
   }
 }

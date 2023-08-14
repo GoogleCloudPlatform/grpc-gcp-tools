@@ -1,11 +1,11 @@
 // Copyright 2023 Google LLC
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -45,10 +45,15 @@ absl::Status StdoutEventExporter::HandleData(absl::string_view log_name,
 
   auto conn_id = GetLogConnId(log_name, data);
 
-  auto uuid = correlator_->GetUUID(conn_id);
-
+  absl::StatusOr<std::string> uuid;
+  for (auto& correlator : correlators_) {
+    uuid = correlator->GetUUID(conn_id);
+    if (uuid.ok()) {
+      break;
+    }
+  }
   if (!uuid.ok()) {
-    return absl::OkStatus();
+      return absl::OkStatus();
   }
 
   auto log_data = GetLogString(log_name, *uuid, data);

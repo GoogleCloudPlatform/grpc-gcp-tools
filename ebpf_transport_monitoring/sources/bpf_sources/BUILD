@@ -133,6 +133,41 @@ bpf_program(
 )
 
 bpf_program(
+    name = "openssl_core",
+    src = "openssl_bpf.c",
+    core = True,
+    deps = [
+        ":maps",
+        ":missing_headers",
+        ":parse_h2_frame",
+        ":sym_helpers",
+        ":vmlinux",
+        "//:events",
+        "//sources/common:correlator_types",
+        "//sources/common:defines",
+        "//sources/common:syms",
+        "@libbpf",
+    ],
+)
+
+bpf_program(
+    name = "openssl_bpf",
+    src = "openssl_bpf.c",
+    core = False,
+    deps = [
+        ":maps",
+        ":parse_h2_frame",
+        ":sym_helpers",
+        "//:events",
+        "//external_libs/include:stdarg",
+        "//sources/common:correlator_types",
+        "//sources/common:defines",
+        "//sources/common:syms",
+        "@libbpf",
+    ],
+)
+
+bpf_program(
     name = "maps_core",
     src = "maps.c",
     core = True,
@@ -165,6 +200,7 @@ pkg_tar(
     srcs = [
         ":h2_bpf_core",
         ":maps_core",
+        ":openssl_core",
         ":tcp_bpf_core",
         ":tcp_bpf_kprobe_core",
     ],
