@@ -143,8 +143,8 @@ void DataManager::AddExternalMetricHandler(
   ext_metric_handlers_.push_back(metric_handler);
 }
 
-absl::Status DataManager::AddLogHandler(absl::string_view name,
-                                        LogHandlerInterface *log_handler) {
+absl::Status DataManager::AddLogHandler(
+    absl::string_view name, std::shared_ptr<LogHandlerInterface> log_handler) {
   if (registered_sources_.find(name) == registered_sources_.end()) {
     auto status = RegisterLog(data_sources_[name]);
     if (!status.ok()) {
@@ -156,7 +156,8 @@ absl::Status DataManager::AddLogHandler(absl::string_view name,
 }
 
 absl::Status DataManager::AddMetricHandler(
-    absl::string_view name, MetricHandlerInterface *metric_handler) {
+    absl::string_view name,
+    std::shared_ptr<MetricHandlerInterface> metric_handler) {
   if (registered_sources_.find(name) == registered_sources_.end()) {
     auto status = RegisterMetric(data_sources_[name]);
     if (!status.ok()) {
@@ -260,11 +261,11 @@ void DataManager::HandleCleanup(evutil_socket_t, short, void *arg) {  // NOLINT
     handler->Cleanup();
   }
   for (const auto &handler_it : this_->metric_handlers_) {
-    for (auto handler : handler_it.second) {
+    for (const auto &handler : handler_it.second) {
       if (handlers.find(handler) != handlers.end()) {
         continue;
       }
-      handlers.insert(handler);
+      handlers.insert(handler.get());
       handler->Cleanup();
     }
   }

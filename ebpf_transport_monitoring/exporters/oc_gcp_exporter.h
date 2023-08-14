@@ -47,7 +47,8 @@ class OCGCPMetricExporter : public MetricExporterInterface {
 
  private:
   void GetTags();
-  opencensus::tags::TagMap& GetTagMap(const std::string& uuid);
+  opencensus::tags::TagMap& GetTagMap(const std::string& uuid,
+                              std::shared_ptr<CorrelatorInterface> correlator);
   void GetMesure(std::string& name, const MetricDesc& desc);
   std::unique_ptr<google::monitoring::v3::MetricService::StubInterface>
   MakeMetricServiceStub(std::string& json_text);

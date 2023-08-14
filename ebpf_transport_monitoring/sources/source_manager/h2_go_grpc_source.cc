@@ -205,7 +205,7 @@ namespace ebpf_monitor {
 H2GoGrpcSource::H2GoGrpcSource()
     : Source::Source(
           {},
-          {std::make_shared<DataCtx>("h2_grpc_events", LogDesc{},
+          {std::make_shared<DataCtx>("h2_events", LogDesc{},
                                      absl::Seconds(2), false, true),
            std::make_shared<DataCtx>("h2_grpc_correlation", LogDesc{},
                                      absl::Seconds(2), true, false)},

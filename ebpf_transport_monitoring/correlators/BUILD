@@ -28,7 +28,9 @@ cc_library(
         "//sources/common:correlator_types",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/time",
     ],
 )
@@ -42,5 +44,22 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "openssl_correlator",
+    srcs = ["openssl_correlator.cc"],
+    hdrs = ["openssl_correlator.h"],
+    deps = [
+        "//:events",
+        "//ebpf_monitor/correlator",
+        "//ebpf_monitor/source:data_ctx",
+        "//sources/common:correlator_types",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/time",
     ],
 )

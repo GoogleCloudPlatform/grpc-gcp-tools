@@ -43,7 +43,16 @@ absl::Status StdoutMetricExporter::HandleData(absl::string_view metric_name,
 
   metric_format_t* metric = (metric_format_t*)value;
 
-  auto uuid = correlator_->GetUUID(*(uint64_t*)key);
+  absl::StatusOr<std::string> uuid;
+  for (auto& correlator : correlators_) {
+    uuid = correlator->GetUUID(*(uint64_t*)key);
+    if (uuid.ok()) {
+      break;
+    }
+  }
+  if (!uuid.ok()) {
+      return absl::OkStatus();
+  }
 
   // In case the uuid is not found it either means that this is an old
   // connection that is not cleaned up or it is a connection we don't trace.
@@ -57,10 +66,11 @@ absl::Status StdoutMetricExporter::HandleData(absl::string_view metric_name,
   }
 
   auto metric_str = GetMetricString(
-      metric_name, *uuid, it->second, key, &(metric->data));
+      metric_name, *uuid, it->second, key, &(metric->data), metric->timestamp);
   if (!metric_str.ok()) {
     return metric_str.status();
   }
+
   std::cout << *metric_str << std::endl;
   return absl::OkStatus();
 }
@@ -68,8 +78,11 @@ absl::Status StdoutMetricExporter::HandleData(absl::string_view metric_name,
 void StdoutMetricExporter::Cleanup() {
   auto uuids = last_read_.GetUUID();
   for (const auto& uuid : uuids) {
-    if (!correlator_->CheckUUID(uuid)) {
-      last_read_.DeleteValue(uuid);
+    for (auto& correlator : correlators_) {
+      if (!correlator->CheckUUID(uuid)) {
+        last_read_.DeleteValue(uuid);
+        return;
+      }
     }
   }
 }

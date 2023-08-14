@@ -16,7 +16,6 @@
 #define _EBPF_MONITOR_SOURCE_DATA_SOURCE_H_
 
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -38,7 +37,7 @@ class Source {
          std::vector<std::shared_ptr<DataCtx>> metric_sources,
          absl::string_view file_name, absl::string_view file_name_core,
          absl::string_view pid_filter_map);
-  virtual absl::Status Init();
+  virtual absl::Status Init(bool extract_source);
   virtual absl::Status LoadObj();
   virtual absl::Status LoadMaps();
   virtual absl::Status LoadProbes();

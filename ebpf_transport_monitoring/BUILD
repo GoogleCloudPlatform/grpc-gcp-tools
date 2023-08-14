@@ -53,6 +53,7 @@ cc_binary(
     deps = [
         ":data_manager",
         "//correlators:h2_go_correlator",
+        "//correlators:openssl_correlator",
         "//ebpf_monitor/correlator",
         "//ebpf_monitor/exporter:log_exporter",
         "//ebpf_monitor/exporter:metric_exporter",
@@ -65,6 +66,7 @@ cc_binary(
         "//sources/bpf_sources:sources",
         "//sources/source_manager:h2_go_grpc_source",
         "//sources/source_manager:map_source",
+        "//sources/source_manager:openssl_source",
         "//sources/source_manager:tcp_source",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/flags:flag",

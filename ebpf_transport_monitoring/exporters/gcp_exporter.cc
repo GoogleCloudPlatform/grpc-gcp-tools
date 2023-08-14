@@ -114,9 +114,15 @@ absl::Status GCPLogger::HandleData(absl::string_view log_name,
     return absl::NotFoundError("log not registered");
   }
   auto conn_id = GetLogConnId(log_name, data);
-  auto uuid = correlator_->GetUUID(conn_id);
+  absl::StatusOr<std::string> uuid;
+  for (auto& correlator : correlators_) {
+    uuid = correlator->GetUUID(conn_id);
+    if (uuid.ok()) {
+      break;
+    }
+  }
   if (!uuid.ok()) {
-    return absl::OkStatus();
+      return absl::OkStatus();
   }
   auto log_data = GetLogString(log_name, *uuid, data);
   if (!log_data.ok()) {

@@ -28,8 +28,12 @@ namespace ebpf_monitor {
 OpenSslSource::OpenSslSource()
     : Source::Source(
           {},
-          {std::make_shared<DataCtx>("h2_events", LogDesc{}, absl::Seconds(2),
-                                     false, true)},
+          {
+            std::make_shared<DataCtx>("h2_events", LogDesc{}, absl::Seconds(2),
+                                     false, true),
+            std::make_shared<DataCtx>("openssl_correlation_events", LogDesc{},
+                                     absl::Seconds(2), true, false)
+          },
           {
               {std::make_shared<DataCtx>("h2_stream_count",
                                          MetricDesc{MetricType::kUint64,
@@ -102,23 +106,25 @@ absl::Status OpenSslSource::RegisterProbes(ElfReader* elf_reader,
   if (!offset.ok()) {
     std::cerr << offset.status() << "\n";
     count++;
+  } else {
+    probes_.push_back(
+        std::make_shared<UProbe>("probe_entry_SSL_read", path, *offset, false));
+    probes_.push_back(
+        std::make_shared<UProbe>("probe_ret_SSL_read", path, *offset, true));
   }
-  probes_.push_back(std::make_shared<UProbe>("probe_entry_SSL_read", path,
-                                             *offset, false, pid));
-  probes_.push_back(
-      std::make_shared<UProbe>("probe_ret_SSL_read", path, *offset, true, pid));
-
   offset = elf_reader->GetSymbol("SSL_write");
   if (!offset.ok()) {
     std::cerr << offset.status() << "\n";
     count++;
+  } else {
+    probes_.push_back(
+        std::make_shared<UProbe>("probe_entry_SSL_write",
+                                 path, *offset, false));
+    probes_.push_back(
+        std::make_shared<UProbe>("probe_ret_SSL_write", path, *offset, true));
   }
-  probes_.push_back(std::make_shared<UProbe>("probe_entry_SSL_write", path,
-                                             *offset, false, pid));
-  probes_.push_back(std::make_shared<UProbe>("probe_ret_SSL_write", path,
-                                             *offset, true, pid));
-  if (count != 2) {
-    return absl::InternalError("Did not find function offsets");
+  if (count != 0) {
+    return absl::InternalError("Did not find some function offsets");
   }
   return absl::OkStatus();
 }
