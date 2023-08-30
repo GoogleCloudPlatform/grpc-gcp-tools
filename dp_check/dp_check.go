@@ -45,6 +45,7 @@ import (
 	"syscall"
 	"time"
 
+	// TODO(apolcyn): depend on a canonical version of grpclb protos
 	"google.golang.org/grpc"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 	"google.golang.org/grpc/codes"
