@@ -38,6 +38,7 @@ typedef struct frame_offsets__ {
   member_var_t rstframe_error;
   member_var_t goawayframe_error;
   member_var_t goawayframe_stream;
+  member_var_t goawayframe_data;
   member_var_t settingsframe_data;
   member_var_t client_framer;
   member_var_t server_framer;

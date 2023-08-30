@@ -77,13 +77,17 @@ absl::Status StdoutMetricExporter::HandleData(absl::string_view metric_name,
 
 void StdoutMetricExporter::Cleanup() {
   auto uuids = last_read_.GetUUID();
+  bool found;
   for (const auto& uuid : uuids) {
+    found = false;
     for (auto& correlator : correlators_) {
-      if (!correlator->CheckUUID(uuid)) {
-        last_read_.DeleteValue(uuid);
-        return;
+      if (correlator->CheckUUID(uuid)) {
+        found = true;
+        break;
       }
     }
+    if (found) continue;
+    last_read_.DeleteValue(uuid);
   }
 }
 

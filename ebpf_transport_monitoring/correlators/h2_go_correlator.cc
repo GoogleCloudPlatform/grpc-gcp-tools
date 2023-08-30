@@ -53,7 +53,7 @@ absl::Status H2GoCorrelator::Init() {
       return map.status();
     }
     log_sources_.push_back(*map);
-    map = source->GetMap("h2_grpc_events");
+    map = source->GetMap("h2_events");
     if (!map.ok()) {
       return map.status();
     }
