@@ -45,6 +45,7 @@ import (
 	"syscall"
 	"time"
 
+	// TODO(apolcyn): depend on a canonical version of grpclb protos
 	"google.golang.org/grpc"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 	"google.golang.org/grpc/codes"
@@ -66,6 +67,8 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	v3httppb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/load_balancing_policies/client_side_weighted_round_robin/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/load_balancing_policies/pick_first/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/load_balancing_policies/ring_hash/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/load_balancing_policies/round_robin/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/load_balancing_policies/wrr_locality/v3"
 	v3adsgrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -131,7 +134,7 @@ const (
 
 	trafficDirectorPort             = "443"
 	userAgentName                   = "dp-check"
-	userAgentVersion                = "1.8"
+	userAgentVersion                = "1.9"
 	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
 	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
 	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
@@ -850,16 +853,19 @@ func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, er
 	}
 	var results []string
 	countPriorityZero, countPriorityOne, countPriorityOthers := 0, 0, 0
+	numBackendInPriorityZero, numBackendInPriorityOne := 0, 0
 	for _, endpoint := range clusterLoadAssignment.GetEndpoints() {
 		switch endpoint.GetPriority() {
 		case 0:
 			countPriorityZero++
+			numBackendInPriorityZero += len(endpoint.GetLbEndpoints())
 			for _, lbendpoint := range endpoint.GetLbEndpoints() {
 				endpoint := lbendpoint.GetEndpoint().GetAddress().GetSocketAddress()
 				results = append(results, net.JoinHostPort(endpoint.GetAddress(), fmt.Sprint(endpoint.GetPortValue())))
 			}
 		case 1:
 			countPriorityOne++
+			numBackendInPriorityOne += len(endpoint.GetLbEndpoints())
 		default:
 			countPriorityOthers++
 		}
@@ -873,6 +879,8 @@ func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, er
 	if results == nil {
 		return []string{}, fmt.Errorf("no endpoints received in EDS response")
 	}
+	infoLog.Printf("Received %v backends in the primary cluster", numBackendInPriorityZero)
+	infoLog.Printf("Received %v backends in the secondary cluster", numBackendInPriorityOne)
 	return results, nil
 }
 
@@ -1065,7 +1073,7 @@ func getBackendAddrsFromTrafficDirector(ipv6Capable bool) ([]string, error) {
 
 func main() {
 	flag.Parse()
-	infoLog.Println("Running dp_check.")
+	infoLog.Printf("Running dp_check: service=%s, ipv4_only=%v, ipv6_only=%v, ipv4_and_v6=%v, check_grpclb=%v, check_xds=%v, td_endpoint=%s, xds_expect_fallback_configured=%v\n", *service, *ipv4Only, *ipv6Only, *ipv4AndV6, *checkGrpclb, *checkXds, *trafficDirectorHostname, *xdsExpectFallbackConfigured)
 	if len(*service) == 0 {
 		panic("--service not set")
 	}
