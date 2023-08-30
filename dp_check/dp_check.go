@@ -363,7 +363,7 @@ func getBackendAddrsFromGrpclb(lbAddr string, balancerHostname string, srvQuerie
 		return nil, fmt.Errorf("failed to create grpc connection to balancer: %v", err)
 	}
 	infoLog.Printf("Successfully dialed balancer. Now send initial grpc request...")
-	lbClient := lbgrpc.NewLoadBalancerClient(conn)
+	lbClient := lbpb.NewLoadBalancerClient(conn)
 	stream, err := lbClient.BalanceLoad(ctx)
 	initReq := &lbpb.LoadBalanceRequest{
 		LoadBalanceRequestType: &lbpb.LoadBalanceRequest_InitialRequest{
