@@ -32,7 +32,8 @@
   The largest data block is an array of h2 settings currently,
   which goes to around 240 bytes. With buffer 512 is selected.
 */
-#define EC_MAX_EVENT_DATA_SIZE 512
+#define EC_MAX_EVENT_DATA_SIZE    512
+
 
 /* The information collected by eBPF will be stored or sent in the form of the
   following packed C struct.*/
@@ -168,6 +169,14 @@ typedef struct {
 typedef struct {
   __u32 last_stream_id;  // Last stream that will be accepted by the server.
   __u32 error_code;      // Error code sent by the server.
+} ec_h2_go_away_mdata_t;
+
+#define EC_MAX_GO_AWAY_DATA_SIZE  \
+      EC_MAX_EVENT_DATA_SIZE - sizeof (ec_h2_go_away_mdata_t)
+
+typedef struct {
+  ec_h2_go_away_mdata_t mdata;
+  uint8_t debug_data [EC_MAX_GO_AWAY_DATA_SIZE];
 } ec_h2_go_away_t;
 
 typedef enum {

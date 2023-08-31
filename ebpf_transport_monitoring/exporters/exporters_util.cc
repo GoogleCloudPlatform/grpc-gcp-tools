@@ -20,6 +20,7 @@
 #include <netinet/ip6.h>
 #include <sys/socket.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -101,8 +102,21 @@ std::string GetEventString(ec_h2_stream_state_t state) {
   }
 }
 
+std::string GetDebugHexString(const uint8_t * debug_data, uint32_t length) {
+  if (length == 0) return "";
+  if (length > EC_MAX_GO_AWAY_DATA_SIZE) return "";
+  char str[2*EC_MAX_GO_AWAY_DATA_SIZE + 1];
+  char *p = str;
+  size_t buffer_size = sizeof(str);
+  for (size_t i = 0;  i < length;  ++i) {
+    p += absl::SNPrintF(p, (buffer_size - 2 * i), "%02hhx", debug_data[i]);
+  }
+  return str;
+}
+
 absl::StatusOr<std::string> PrintH2Data(uint32_t event_type,
-                                               const void *const event_info) {
+                                        const void *const event_info,
+                                        uint32_t length) {
   switch (event_type) {
     case EC_H2_EVENT_START:
       return "New connection found";
@@ -117,8 +131,14 @@ absl::StatusOr<std::string> PrintH2Data(uint32_t event_type,
     case EC_H2_EVENT_GO_AWAY: {
       const ec_h2_go_away_t *const state =
           static_cast<const ec_h2_go_away_t *const>(event_info);
-      return absl::StrFormat("Go Away Last stream: %d  Error: %d",
-                             state->last_stream_id, state->error_code);
+      uint32_t debug_data_size = length - sizeof(ec_h2_go_away_mdata_t);
+      return absl::StrFormat(
+          "Go Away Last stream: %d  Error: %d Debug_data: %s:%d",
+                             state->mdata.last_stream_id,
+                             state->mdata.error_code,
+                             GetDebugHexString(state->debug_data,
+                                               debug_data_size),
+                             debug_data_size);
     }
     // There is no event specific data for following types
     case EC_H2_EVENT_WINDOW_UPDATE:
@@ -221,7 +241,8 @@ absl::StatusOr<std::string> GetLogString(
       }
       break;
     case EC_CAT_HTTP2:
-      event_info = PrintH2Data(events->mdata.event_type, events->event_info);
+      event_info = PrintH2Data(events->mdata.event_type, events->event_info,
+                               events->mdata.length);
       if (!event_info.ok()) {
         return event_info;
       }

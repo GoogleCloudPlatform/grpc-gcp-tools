@@ -235,19 +235,56 @@ static __always_inline int send_h2_go_away (void * ctx,
                                      ec_ebpf_events_t * event,
                                      void * frame_ptr){
   ec_h2_go_away_t * data = (ec_h2_go_away_t*)event->event_info;
-  REQUIRE_MEM_VAR(configuration->offset.goawayframe_stream,
-                  data->last_stream_id);
-  READ_MEMBER(frame_ptr, configuration->offset.goawayframe_stream,
-              &data->last_stream_id);
-  REQUIRE_MEM_VAR(configuration->offset.goawayframe_error, data->error_code);
-  READ_MEMBER(frame_ptr, configuration->offset.goawayframe_error,
-              &data->error_code);
   event->mdata.event_type = EC_H2_EVENT_GO_AWAY;
-  event->mdata.length = sizeof(ec_h2_go_away_t);
 
-  bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU, event,
+  REQUIRE_MEM_VAR(configuration->offset.goawayframe_stream,
+                  data->mdata.last_stream_id);
+  READ_MEMBER(frame_ptr, configuration->offset.goawayframe_stream,
+              &data->mdata.last_stream_id);
+  REQUIRE_MEM_VAR(configuration->offset.goawayframe_error,
+                  data->mdata.error_code);
+  READ_MEMBER(frame_ptr, configuration->offset.goawayframe_error,
+              &data->mdata.error_code);
+  struct go_slice slice;
+
+  REQUIRE_MEM_VAR(configuration->offset.goawayframe_data, slice);
+  int64_t success = bpf_probe_read(&slice, sizeof(slice), frame_ptr +
+                 configuration->offset.goawayframe_data.offset);
+  if (unlikely((success < 0 || slice.len <= 0 || slice.ptr == NULL))) {
+    event->mdata.length = sizeof(ec_h2_go_away_mdata_t);
+    bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU, event,
                         sizeof(ec_ebpf_event_metadata_t) +
-                        sizeof(ec_h2_go_away_t));
+                        sizeof(ec_h2_go_away_mdata_t));
+    return 0;
+  }
+
+  // Following lines are needed on some compilers and environments to
+  // satisfy the bpf verifier.
+  size_t length = slice.len;
+  size_t length_minus_1 = length - 1;
+  asm volatile("" : "+r"(length_minus_1) :);
+  length = length_minus_1 + 1;
+
+  uint8_t * debug_data = (uint8_t *)data->debug_data;
+  if (length > EC_MAX_GO_AWAY_DATA_SIZE){
+    length = EC_MAX_GO_AWAY_DATA_SIZE;
+  }
+
+  success = bpf_probe_read(debug_data, (uint32_t) length, slice.ptr);
+  if (unlikely((success < 0 || slice.len <= 0 || slice.ptr == NULL))) {
+    event->mdata.length = sizeof(ec_h2_go_away_mdata_t);
+    bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU, event,
+                        sizeof(ec_ebpf_event_metadata_t) +
+                        sizeof(ec_h2_go_away_mdata_t));
+    return 0;
+  }
+  event->mdata.length = length + sizeof(ec_h2_go_away_mdata_t);
+  uint64_t data_length = event->mdata.length + sizeof(ec_ebpf_event_metadata_t);
+  if (unlikely(data_length > sizeof(ec_ebpf_events_t))){
+    data_length = sizeof(ec_ebpf_events_t);
+  }
+  bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU,
+                        event, data_length);
   return 0;
 }
 

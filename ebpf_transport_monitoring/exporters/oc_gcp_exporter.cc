@@ -75,10 +75,10 @@ Aggregation DataDistributionAggregation() {
 
 Aggregation TimeDistributionAggregation() {
   return Aggregation::Distribution(BucketBoundaries::Explicit(
-      {0,   0.01, 0.05, 0.1,  0.3,   0.6,   0.8,   1,     2,   3,   4,
-       5,   6,    8,    10,   13,    16,    20,    25,    30,  40,  50,
-       65,  80,   100,  130,  160,   200,   250,   300,   400, 500, 650,
-       800, 1000, 2000, 5000, 10000, 20000, 50000, 100000}));
+      {0,   10 , 50, 100,  300,   600,   800,   1000,     2000,   4000,
+       6000,  10000,   13000,    16000,    20000,    25000,  30000,
+       40000,   50000 , 65000,  80000,   100000,  130000,  160000, 200000,
+       250000,   300000,   400000, 500000, 650000, 800000, 1000000}));
 }
 
 Aggregation CountDistributionAggregation() {
@@ -138,8 +138,8 @@ absl::Status OCGCPMetricExporter::Init() {
 static std::string OCGetUnitString(MetricUnit_t unit) {
   switch (unit.type) {
     case MetricUnitType::kTime:
-      // we always convert to milli seconds
-      return TimeTypeString(MetricTimeType::kMsec);
+      // we always convert to micro seconds
+      return TimeTypeString(MetricTimeType::kUsec);
     case MetricUnitType::kData:
       return OCDataTypeString(unit.data);
     case MetricUnitType::kNone:
@@ -281,20 +281,20 @@ opencensus::tags::TagMap&
   return *default_tag_map_;
 }
 
-static uint64_t GetMs(uint64_t val, MetricTimeType type) {
+static uint64_t GetUs(uint64_t val, MetricTimeType type) {
   switch (type) {
     case MetricTimeType::kNsec:
-      return val / 1000000;
-    case MetricTimeType::kUsec:
       return val / 1000;
-    case MetricTimeType::kMsec:
+    case MetricTimeType::kUsec:
       return val;
-    case MetricTimeType::kSec:
+    case MetricTimeType::kMsec:
       return val * 1000;
+    case MetricTimeType::kSec:
+      return val * 1000 * 1000;
     case MetricTimeType::kMin:
-      return val * 60 * 000;
+      return val * 60 * 1000 * 1000;
     case MetricTimeType::kHour:
-      return val * 3600 * 1000;
+      return val * 3600 * 1000 * 1000;
   }
   // This will not happen;
   static_assert(true);
@@ -339,7 +339,7 @@ absl::Status OCGCPMetricExporter::HandleData(absl::string_view metric_name,
     return val.status();
   }
   if (metric_desc->second.unit.type == MetricUnitType::kTime) {
-    *val = GetMs(*val, metric_desc->second.unit.time);
+    *val = GetUs(*val, metric_desc->second.unit.time);
   }
   if (metric_desc->second.kind == MetricKind::kCumulative) {
     *val = *val - data_memory_.StoreAndGetValue(metric_name, *uuid, *val);
@@ -369,15 +369,19 @@ absl::Status OCGCPMetricExporter::CustomLabels(
 
 void OCGCPMetricExporter::Cleanup() {
   auto uuids = last_read_.GetUUID();
+  bool found;
   for (const auto& uuid : uuids) {
+    found = false;
     for (auto& correlator : correlators_) {
-      if (!correlator->CheckUUID(uuid)) {
-        last_read_.DeleteValue(uuid);
-        data_memory_.DeleteValue(uuid);
-        tag_maps_.erase(uuid);
-        return;
+      if (correlator->CheckUUID(uuid)) {
+        found = true;
+        break;
       }
     }
+    if (found) continue;
+    last_read_.DeleteValue(uuid);
+    data_memory_.DeleteValue(uuid);
+    tag_maps_.erase(uuid);
   }
 }
 

@@ -60,7 +60,7 @@ absl::Status GetStructOffsets(std::string& path, h2_cfg_t* bpf_cfg) {
   structs["http2.DataFrame"] = {{"data"}};
   structs["http2.RSTStreamFrame"] = {{"ErrCode"}};
   structs["http2.SettingsFrame"] = {{"p"}};
-  structs["http2.GoAwayFrame"] = {{"ErrCode"}, {"LastStreamID"}};
+  structs["http2.GoAwayFrame"] = {{"ErrCode"}, {"LastStreamID"}, {"debugData"}};
   structs["transport.http2Client"] = {
       {"framer"}, {"localAddr"}, {"remoteAddr"}};
   structs["transport.http2Server"] = {
@@ -83,6 +83,7 @@ absl::Status GetStructOffsets(std::string& path, h2_cfg_t* bpf_cfg) {
         .rstframe_error = {.offset = 12, .size = 4},
         .goawayframe_error = {.offset = 16, .size = 4},
         .goawayframe_stream = {.offset = 12, .size = 4},
+        .goawayframe_data = {.offset = 20, .size = sizeof(struct go_slice)},
         .settingsframe_data = {.offset = 16, .size = sizeof(struct go_slice)},
         .client_framer = {.offset = 160, .size = sizeof(uint64_t)},
         .server_framer = {.offset = 128, .size = sizeof(uint64_t)},
@@ -136,6 +137,9 @@ absl::Status GetStructOffsets(std::string& path, h2_cfg_t* bpf_cfg) {
     EBPF_TM_RETURN_IF_ERROR(GetValue(reader, "http2.GoAwayFrame",
                                      "LastStreamID",
                                      &bpf_cfg->offset.goawayframe_stream, -1));
+    EBPF_TM_RETURN_IF_ERROR(GetValue(reader, "http2.GoAwayFrame", "debugData",
+                          &bpf_cfg->offset.goawayframe_data,
+                          sizeof(struct go_slice)));
     EBPF_TM_RETURN_IF_ERROR(GetValue(reader, "net.TCPAddr", "IP",
                                      &bpf_cfg->offset.tcp_ip,
                           sizeof(struct go_slice)));

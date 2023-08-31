@@ -93,7 +93,7 @@ static __always_inline int send_h2_reset(void *ctx, ec_ebpf_events_t *event,
 static __always_inline int parse_h2_frame(void *ctx, char *buf_ptr,
                                           uint32_t len, ec_ebpf_events_t *event,
                                           bool client) {
-  //char fmt[] = "%d %d %d";
+  // char fmt[] = "%d %d %d";
   int curr_loc = 0;
   uint32_t frame_length;
   int success;
@@ -176,26 +176,52 @@ static __always_inline int parse_h2_frame(void *ctx, char *buf_ptr,
     case H2_GOAWAY: {
       ec_h2_go_away_t *data = (ec_h2_go_away_t *)event->event_info;
       if (unlikely(
-              bpf_probe_read(&data->last_stream_id, 4, &buf_ptr[curr_loc]))) {
+              bpf_probe_read(&data->mdata.last_stream_id, 4,
+                             &buf_ptr[curr_loc]))) {
         return -1;
       }
-      data->last_stream_id = bpf_ntohl(data->last_stream_id);
-      if (unlikely(bpf_probe_read(&data->error_code, 4, &buf_ptr[curr_loc]))) {
+      data->mdata.last_stream_id = bpf_ntohl(data->mdata.last_stream_id);
+      if (unlikely(bpf_probe_read(&data->mdata.error_code, 4,
+                                  &buf_ptr[curr_loc]))) {
         return -1;
       }
-
+      curr_loc +=8;
       event->mdata.event_type = EC_H2_EVENT_GO_AWAY;
-      event->mdata.length = sizeof(ec_h2_go_away_t);
+      event->mdata.length = sizeof(ec_h2_go_away_mdata_t);
 
       bpf_perf_event_output(
           ctx, &h2_events, BPF_F_CURRENT_CPU, event,
-          sizeof(ec_ebpf_event_metadata_t) + sizeof(ec_h2_go_away_t));
+          sizeof(ec_ebpf_event_metadata_t) + sizeof(ec_h2_go_away_mdata_t));
+      break;
+
+      size_t length = frame_length - curr_loc;
+
+      uint8_t * debug_data = (uint8_t *)data->debug_data;
+      if (length > EC_MAX_GO_AWAY_DATA_SIZE){
+        length = EC_MAX_GO_AWAY_DATA_SIZE;
+      }
+      success = bpf_probe_read(debug_data, (uint32_t) length,
+                               &buf_ptr[curr_loc]);
+      if (unlikely(success < 0)) {
+        event->mdata.length = sizeof(ec_h2_go_away_mdata_t);
+        bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU, event,
+                            sizeof(ec_ebpf_event_metadata_t) +
+                            sizeof(ec_h2_go_away_mdata_t));
+        return 0;
+      }
+      event->mdata.length = length + sizeof(ec_h2_go_away_mdata_t);
+      uint64_t data_length = length + sizeof(ec_ebpf_event_metadata_t)
+                            + sizeof(ec_h2_go_away_mdata_t);
+      if (unlikely(data_length > sizeof(ec_ebpf_events_t))){
+        data_length = sizeof(ec_ebpf_events_t);
+      }
+      bpf_perf_event_output(ctx, &h2_events, BPF_F_CURRENT_CPU,
+                            event, data_length);
       break;
     }
-
     // Header Frame
     case H2_HEADERS: {
-      //bpf_trace_printk(fmt, sizeof(fmt), frame_type);
+      // bpf_trace_printk(fmt, sizeof(fmt), frame_type);
       if (unlikely(client)) {
         send_h2_headers(ctx, event, stream_id);
       }
