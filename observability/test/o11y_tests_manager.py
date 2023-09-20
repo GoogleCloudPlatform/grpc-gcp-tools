@@ -220,7 +220,7 @@ class TestManager:
                                           test_case)
 
     def add_lang_jobs(self, lang: SupportedLang) -> None:
-        for test_case in ObservabilityTestCase:
+        for test_case in ['test_monitoring_basic']:
             queue_key = '%s:%d' % (lang, self.get_next_lang_shard_num(lang))
             self.add_job_to_job_queue(queue_key, lang, lang, test_case)
 

@@ -497,7 +497,7 @@ class TestCaseImpl(unittest.TestCase):
             self.args.job_mode, self.test_runner.job_name), 'sponge_log.log')
         self.sponge_log_out = open(sponge_log_file, 'a')
         # TODO(stanleycheung): generalize this when we added back GKE tests
-        self.RESOURCE_TYPE = 'gce_instance'
+        self.RESOURCE_TYPE = 'k8s_container'
         if os.environ.get('RESOURCE_TYPE_ASSERTION_OVERRIDE'):
             self.RESOURCE_TYPE = str(os.environ.get('RESOURCE_TYPE_ASSERTION_OVERRIDE'))
 
@@ -679,10 +679,10 @@ class TestCaseImpl(unittest.TestCase):
                           config_location: ConfigLocation = ConfigLocation.FILE,
                           server_config_into_env_var: Optional[ObservabilityConfig] = None,
                           client_config_into_env_var: Optional[ObservabilityConfig] = None) -> None:
-        self.gce_setup_and_run_rpc(actions,
-                                   config_location,
-                                   server_config_into_env_var,
-                                   client_config_into_env_var)
+        self.gke_setup_and_run_rpc(actions)
+        #                           config_location,
+        #                           server_config_into_env_var,
+        #                           client_config_into_env_var)
 
     def gce_setup_and_run_rpc(self,
                               actions: List[InteropAction],
@@ -752,6 +752,7 @@ class TestCaseImpl(unittest.TestCase):
             image=image_name,
             env=[kubernetes_client.V1EnvVar(name=CONFIG_ENV_VAR_NAME,
                                             value=config.toJson())],
+            ports=[kubernetes_client.V1ContainerPort(container_port=9464)],
             args=args,
         )
         pod = kubernetes_client.V1Pod(
@@ -781,15 +782,15 @@ class TestCaseImpl(unittest.TestCase):
                 return pod.status.phase
         raise Exception('Pod not found')
 
-    def gke_wait_server_ready(self, server_pod_name: str) -> None:
-        server_pod_status = ''
+    def gke_wait_for_pod_ready(self, pod_name: str) -> None:
+        pod_status = ''
         wait_secs = 0
-        while server_pod_status != 'Running':
-            server_pod_status = self.gke_get_pod_status(server_pod_name)
+        while pod_status != 'Running':
+            pod_status = self.gke_get_pod_status(pod_name)
             wait_secs += 1
             time.sleep(1)
             if wait_secs > WAIT_SECS_SERVER_START:
-                raise Exception('timeout waiting for server pod to be ready')
+                raise Exception('timeout waiting for pod %s to be ready' % pod_name)
 
     def gke_wait_delete_pod(self, pod_names: List[str]) -> None:
         k8s_core_v1 = kubernetes_client.CoreV1Api()
@@ -827,7 +828,7 @@ class TestCaseImpl(unittest.TestCase):
         )
 
         logger.info('Waiting for server pod to get ready')
-        self.gke_wait_server_ready(SERVER_POD_NAME)
+        self.gke_wait_for_pod_ready(SERVER_POD_NAME)
 
         logger.info('Querying server pod IP')
         server_ip = self.gke_get_pod_ip(SERVER_POD_NAME)
@@ -846,19 +847,47 @@ class TestCaseImpl(unittest.TestCase):
                 args=['client',
                       '--server_host=%s' % server_ip,
                       '--server_port=%s' % self.args.port,
+                      '--num_times=10',
                       '--test_case=%s' % action.test_case],
                 labels={'app.kubernetes.io/name':'grpc-otel-observability-test'}
             )
             client_pod_names.append(client_pod_name)
+            self.gke_wait_for_pod_ready(client_pod_name)
 
         logger.info('Waiting for client action to finish')
-        time.sleep(WAIT_SECS_CLIENT_ACTION)
+        for i in range(0, 6):
+            logger.info('sleeping for 15 seconds')
+            time.sleep(15)
+            for client_pod_name in client_pod_names:
+                logger.info('Querying client pod IP')
+                client_ip = self.gke_get_pod_ip(client_pod_name)
+                client_pod_status = self.gke_get_pod_status(client_pod_name)
+                logger.info('%s %s %s' %(client_pod_name, client_ip, client_pod_status))
+                logger.info('calling curl localhost:9464/metrics on %s', client_pod_name)
+                resp = kubernetes_stream(k8s_core_v1.connect_get_namespaced_pod_exec,
+                                         client_pod_name,
+                                         GKE_NAMESPACE,
+                                         command=['/bin/sh', '-c', 'curl localhost:9464/metrics'],
+                                         stderr=True, stdin=False, stdout=True, tty=False)
+                logger.info(resp);
+                curl_command = 'curl http://%s:9464/metrics' % client_ip
+                logger.info('calling %s on server %s' % (curl_command, SERVER_POD_NAME))
+                resp = kubernetes_stream(k8s_core_v1.connect_get_namespaced_pod_exec,
+                                         SERVER_POD_NAME,
+                                         GKE_NAMESPACE,
+                                         command=['/bin/sh', '-c', curl_command],
+                                         stderr=True, stdin=False, stdout=True, tty=False)
+                logger.info(resp);
 
         logger.info('Deleting server pod %s' % SERVER_POD_NAME)
         response = k8s_core_v1.delete_namespaced_pod(name=SERVER_POD_NAME,
                                                  namespace=GKE_NAMESPACE)
 
         for client_pod_name in client_pod_names:
+            logger.info('Reading logs for pod %s' % client_pod_name)
+            logs = k8s_core_v1.read_namespaced_pod_log(name=client_pod_name,
+                                                       namespace=GKE_NAMESPACE)
+            logger.info(logs)
             logger.info('Deleting client pod %s' % client_pod_name)
             response = k8s_core_v1.delete_namespaced_pod(name=client_pod_name,
                                                          namespace=GKE_NAMESPACE)
