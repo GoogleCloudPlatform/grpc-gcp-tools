@@ -35,6 +35,8 @@ argp.add_argument('--client_lang', required=True, type=str, choices=['java', 'go
                   help='Client language')
 argp.add_argument('--test_case', required=True, type=str,
                   help='Test case to run: see test_utils.py')
+argp.add_argument('--test_environment', default='gce', type=str,
+                  help='Environment to run test case on, gce or gke. Default: gce')
 argp.add_argument('--docker_image_go', default=DOCKER_IMAGE_NAME % 'go', type=str,
                   help='docker image tag for Go interop client/server')
 argp.add_argument('--docker_image_java', default=DOCKER_IMAGE_NAME % 'java', type=str,
@@ -70,8 +72,16 @@ def prepare_docker_image(lang):
 
 def main():
     os.makedirs(SPONGE_LOGS_DIR, exist_ok=True)
-    prepare_docker_image(args.server_lang)
-    prepare_docker_image(args.client_lang)
+    if args.test_environment == 'gce':
+        prepare_docker_image(args.server_lang)
+        prepare_docker_image(args.client_lang)
+    elif args.test_environment == 'gke':
+        os.environ['OBSERVABILITY_TEST_IMAGE_%s' % args.server_lang.upper()] = \
+            DOCKER_IMAGE_NAME % args.server_lang
+        os.environ['OBSERVABILITY_TEST_IMAGE_%s' % args.client_lang.upper()] = \
+            DOCKER_IMAGE_NAME % args.client_lang
+    else:
+        raise Exception('Unsupported test_environment value: %s' % args.test_environment)
     if args.test_case == 'all':
         for test_case in ObservabilityTestCase:
             run_test_case(test_case)
