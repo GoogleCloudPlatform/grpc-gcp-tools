@@ -28,7 +28,6 @@ from google.cloud.monitoring_v3.types.metric_service import ListTimeSeriesRespon
 from google.cloud.trace_v1.services.trace_service.pagers import ListTracesPager
 from google.cloud.trace_v1.types import ListTracesResponse
 from google.protobuf.timestamp_pb2 import Timestamp
-import json
 from kubernetes import ( # type: ignore
     client as kubernetes_client,
     config as kubernetes_config,
@@ -64,6 +63,7 @@ import unittest
 PROJECT = 'microsvcs-testing'
 PROJECT_NUM = '168376032566'
 CLUSTER_NAME = 'grpc-o11y-integration-testing-cluster'
+GKE_NAMESPACE = 'grpc-o11y-integration-test-ns'
 ZONE = 'us-central1-c'
 OBSERVABILITY_LOG_NAME = 'microservices.googleapis.com%2Fobservability%2Fgrpc'
 CONFIG_ENV_VAR_NAME = 'GRPC_GCP_OBSERVABILITY_CONFIG'
@@ -679,6 +679,16 @@ class TestCaseImpl(unittest.TestCase):
                           config_location: ConfigLocation = ConfigLocation.FILE,
                           server_config_into_env_var: Optional[ObservabilityConfig] = None,
                           client_config_into_env_var: Optional[ObservabilityConfig] = None) -> None:
+        self.gce_setup_and_run_rpc(actions,
+                                   config_location,
+                                   server_config_into_env_var,
+                                   client_config_into_env_var)
+
+    def gce_setup_and_run_rpc(self,
+                              actions: List[InteropAction],
+                              config_location: ConfigLocation = ConfigLocation.FILE,
+                              server_config_into_env_var: Optional[ObservabilityConfig] = None,
+                              client_config_into_env_var: Optional[ObservabilityConfig] = None) -> None:
         if config_location == ConfigLocation.FILE:
             server_env = self.get_env_with_config(
                 self.server_config,
@@ -715,6 +725,141 @@ class TestCaseImpl(unittest.TestCase):
             server_proc.wait(timeout=5)
             if exc:
                 raise exc
+
+    def gke_initialize(self) -> None:
+        logger.info('checking k8s config context')
+        contexts, active_context = kubernetes_config.list_kube_config_contexts()
+        if not contexts:
+            raise Exception('Cannot find any context in kube-config file')
+        for context in contexts:
+            if CLUSTER_NAME in context['name']:
+                logger.info(context)
+                kubernetes_config.load_kube_config(context=context['name'])
+                return
+        raise Exception('No context for the right testing cluster was found')
+
+    def gke_create_pod(self,
+                       container_name: str,
+                       pod_name: str,
+                       config: ObservabilityConfig,
+                       args: List[str]) -> None:
+        k8s_core_v1 = kubernetes_client.CoreV1Api()
+        image_name = CommonUtil.get_image_name(self.args.client_lang, self.args.job_mode)
+        logger.info('gke image name = %s' % image_name)
+        container = kubernetes_client.V1Container(
+            name=container_name,
+            image=image_name,
+            env=[kubernetes_client.V1EnvVar(name=CONFIG_ENV_VAR_NAME,
+                                            value=config.toJson())],
+            args=args,
+        )
+        pod = kubernetes_client.V1Pod(
+            metadata=kubernetes_client.V1ObjectMeta(name=pod_name),
+            spec=kubernetes_client.V1PodSpec(
+                containers=[container],
+            ),
+        )
+        k8s_core_v1.create_namespaced_pod(GKE_NAMESPACE, pod)
+
+    def gke_get_pod_ip(self, pod_name: str) -> str:
+        k8s_core_v1 = kubernetes_client.CoreV1Api()
+        pods = k8s_core_v1.list_namespaced_pod(GKE_NAMESPACE)
+        for pod in pods.items:
+            if pod.metadata.name == pod_name:
+                return pod.status.pod_ip
+        raise Exception('Pod not found')
+
+    def gke_get_pod_status(self, pod_name: str) -> str:
+        k8s_core_v1 = kubernetes_client.CoreV1Api()
+        pods = k8s_core_v1.list_namespaced_pod(GKE_NAMESPACE)
+        for pod in pods.items:
+            if pod.metadata.name == pod_name:
+                return pod.status.phase
+        raise Exception('Pod not found')
+
+    def gke_wait_server_ready(self, server_pod_name: str) -> None:
+        server_pod_status = ''
+        wait_secs = 0
+        while server_pod_status != 'Running':
+            server_pod_status = self.gke_get_pod_status(server_pod_name)
+            wait_secs += 1
+            time.sleep(1)
+            if wait_secs > WAIT_SECS_SERVER_START:
+                raise Exception('timeout waiting for server pod to be ready')
+
+    def gke_wait_delete_pod(self, pod_names: List[str]) -> None:
+        k8s_core_v1 = kubernetes_client.CoreV1Api()
+        wait_secs = 0
+        while True:
+            pods = k8s_core_v1.list_namespaced_pod(GKE_NAMESPACE)
+            num_pods_still_to_be_deleted = 0
+            for pod in pods.items:
+                if pod.metadata.name in pod_names:
+                    num_pods_still_to_be_deleted += 1
+            if num_pods_still_to_be_deleted > 0:
+                time.sleep(1)
+                wait_secs += 1
+            else:
+                break
+            if wait_secs > 60:
+                raise Exception('timeout waiting to delete all pods')
+
+    def gke_setup_and_run_rpc(self,
+                              actions: List[InteropAction]) -> None:
+        self.gke_initialize()
+        gke_identifier = self.generate_identifier()
+        SERVER_CONTAINER_NAME = 'grpc-o11y-gke-server-ctnr-%s' % gke_identifier
+        SERVER_POD_NAME = 'grpc-o11y-gke-server-pod-%s' % gke_identifier
+        CLIENT_CONTAINER_NAME_BASE = 'grpc-o11y-gke-client-ctnr-%s'
+        CLIENT_POD_NAME_BASE = 'grpc-o11y-gke-client-pod-%s'
+        k8s_core_v1 = kubernetes_client.CoreV1Api()
+
+        logger.info('Starting server pod')
+        self.gke_create_pod(
+            container_name=SERVER_CONTAINER_NAME,
+            pod_name=SERVER_POD_NAME,
+            config=self.server_config,
+            args=['server', '--port=%s' % self.args.port],
+        )
+
+        logger.info('Waiting for server pod to get ready')
+        self.gke_wait_server_ready(SERVER_POD_NAME)
+
+        logger.info('Querying server pod IP')
+        server_ip = self.gke_get_pod_ip(SERVER_POD_NAME)
+        logger.info(server_ip)
+
+        logger.info('Starting client pods')
+        client_pod_names = []
+        for action in actions:
+            client_action_identifier = self.generate_identifier()
+            client_container_name = CLIENT_CONTAINER_NAME_BASE % client_action_identifier
+            client_pod_name = CLIENT_POD_NAME_BASE % client_action_identifier
+            self.gke_create_pod(
+                container_name=client_container_name,
+                pod_name=client_pod_name,
+                config=self.client_config,
+                args=['client',
+                      '--server_host=%s' % server_ip,
+                      '--server_port=%s' % self.args.port,
+                      '--test_case=%s' % action.test_case]
+            )
+            client_pod_names.append(client_pod_name)
+
+        logger.info('Waiting for client action to finish')
+        time.sleep(WAIT_SECS_CLIENT_ACTION)
+
+        logger.info('Deleting server pod %s' % SERVER_POD_NAME)
+        response = k8s_core_v1.delete_namespaced_pod(name=SERVER_POD_NAME,
+                                                 namespace=GKE_NAMESPACE)
+
+        for client_pod_name in client_pod_names:
+            logger.info('Deleting client pod %s' % client_pod_name)
+            response = k8s_core_v1.delete_namespaced_pod(name=client_pod_name,
+                                                         namespace=GKE_NAMESPACE)
+
+        logger.info('Waiting for pods to get deleted')
+        self.gke_wait_delete_pod(client_pod_names + [SERVER_POD_NAME])
 
     def test_logging_basic(self) -> None:
         self.enable_server_logging()
