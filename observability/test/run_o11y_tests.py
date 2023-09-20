@@ -742,7 +742,8 @@ class TestCaseImpl(unittest.TestCase):
                        container_name: str,
                        pod_name: str,
                        config: ObservabilityConfig,
-                       args: List[str]) -> None:
+                       args: List[str],
+                       labels: Dict[str, str] = {}) -> None:
         k8s_core_v1 = kubernetes_client.CoreV1Api()
         image_name = CommonUtil.get_image_name(self.args.client_lang, self.args.job_mode)
         logger.info('gke image name = %s' % image_name)
@@ -754,7 +755,10 @@ class TestCaseImpl(unittest.TestCase):
             args=args,
         )
         pod = kubernetes_client.V1Pod(
-            metadata=kubernetes_client.V1ObjectMeta(name=pod_name),
+            metadata=kubernetes_client.V1ObjectMeta(
+                name=pod_name,
+                labels=labels,
+            ),
             spec=kubernetes_client.V1PodSpec(
                 containers=[container],
             ),
@@ -842,7 +846,8 @@ class TestCaseImpl(unittest.TestCase):
                 args=['client',
                       '--server_host=%s' % server_ip,
                       '--server_port=%s' % self.args.port,
-                      '--test_case=%s' % action.test_case]
+                      '--test_case=%s' % action.test_case],
+                labels={'app.kubernetes.io/name':'grpc-otel-observability-test'}
             )
             client_pod_names.append(client_pod_name)
 

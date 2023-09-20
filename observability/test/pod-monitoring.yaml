@@ -1,0 +1,21 @@
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  namespace: grpc-o11y-integration-test-ns
+  name: observability-test-gmp
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grpc-otel-observability-test
+  endpoints:
+  - port: 9464
+    interval: 15s
+---
+apiVersion: monitoring.googleapis.com/v1
+kind: OperatorConfig
+metadata:
+  namespace: gmp-public
+  name: config
+features:
+  targetStatus:
+    enabled: true
