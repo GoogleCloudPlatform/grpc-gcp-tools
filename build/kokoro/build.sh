@@ -26,10 +26,10 @@ cd "$(dirname "$0")"
 #
 ##
 
-PROJECT=microsvcs-testing
-CLUSTER=grpc-o11y-integration-testing-cluster
-ZONE=us-central1-c
-TEST_DIR=`realpath ../../observability/test`
+export PROJECT=microsvcs-testing
+export CLUSTER=grpc-o11y-integration-testing-cluster
+export ZONE=us-central1-c
+export TEST_DIR=`realpath ../../observability/test`
 
 if [ -z "${JOB_MODE}" ] || [ -z "${LANGUAGE}" ] ; then
   echo "Error: env var JOB_MODE and LANGUAGE are required."
@@ -159,14 +159,3 @@ elif [ "${LANGUAGE}" = 'interop' ] ; then
   build_java
   build_cpp
 fi
-
-
-
-##
-#
-# Main
-#
-##
-
-# Run observability test job
-${TEST_DIR}/o11y_tests_manager.py --job_mode ${JOB_MODE} --language ${LANGUAGE}
