@@ -13,11 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -ex
+set -e
 cd "$(dirname "$0")"
 
-# Setup and build docker images
-source ./build.sh
-
-# Run observability test job
-${TEST_DIR}/o11y_tests_manager.py --job_mode ${JOB_MODE} --language ${LANGUAGE}
+cd "${KOKORO_ARTIFACTS_DIR}/github/grpc-gcp-tools/build/kokoro"
+./run_csm_observability_tests.sh
