@@ -60,10 +60,10 @@ bpf_program(
     deps = [
         ":maps",
         "//:events",
-        "//external_libs/include:stdarg",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
+        "//third_party/include:stdarg",
         "@libbpf",
     ],
 )
@@ -89,10 +89,10 @@ bpf_program(
     core = False,
     deps = [
         "//:events",
-        "//external_libs/include:stdarg",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
+        "//third_party/include:stdarg",
         "@libbpf",
     ],
 )
@@ -124,10 +124,10 @@ bpf_program(
         ":parse_h2_frame",
         ":sym_helpers",
         "//:events",
-        "//external_libs/include:stdarg",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
+        "//third_party/include:stdarg",
         "@libbpf",
     ],
 )
@@ -159,10 +159,10 @@ bpf_program(
         ":parse_h2_frame",
         ":sym_helpers",
         "//:events",
-        "//external_libs/include:stdarg",
         "//sources/common:correlator_types",
         "//sources/common:defines",
         "//sources/common:syms",
+        "//third_party/include:stdarg",
         "@libbpf",
     ],
 )
@@ -175,8 +175,8 @@ bpf_program(
         ":maps",
         ":vmlinux",
         "//:events",
-        "//external_libs/include:stdarg",
         "//sources/common:defines",
+        "//third_party/include:stdarg",
         "@libbpf",
     ],
 )
@@ -189,8 +189,8 @@ bpf_program(
         ":maps",
         ":vmlinux",
         "//:events",
-        "//external_libs/include:stdarg",
         "//sources/common:defines",
+        "//third_party/include:stdarg",
         "@libbpf",
     ],
 )
