@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "data_manager.h"
+#include "ebpf_monitor/data_manager.h"
 
 #include <iostream>
 #include <memory>
@@ -272,6 +272,7 @@ void DataManager::HandleCleanup(evutil_socket_t, short, void *arg) {  // NOLINT
 }
 
 DataManager::~DataManager() {
+  if (memory_ == nullptr) return;
   free(((void**) memory_)[-1]);
 }
 
