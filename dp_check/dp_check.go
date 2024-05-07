@@ -47,6 +47,7 @@ import (
 
 	// TODO(apolcyn): depend on a canonical version of grpclb protos
 	"google.golang.org/grpc"
+	lbgrpc "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
@@ -77,7 +78,13 @@ import (
 )
 
 var (
-	service  = flag.String("service", "", "Required. The public DirectPath-enabled DNS of the service to check")
+	service = flag.String("service", "", `Required. The public DirectPath-enabled DNS of the service to check.
+
+Note: this can also be a literal IP:port address. In this case, use the --skip flag to skip load balancer interactions, and
+set --ipv4_only or --ipv6_only depending on whether the literal is IPv4 or IPv6, respectively. For example, if the
+literal is an IPv6 address, use flags:
+    --skip="Service SRV DNS queries,TCP/IPv6 connectivity to load balancers,Discovery of IPv6 backends via load balancers"
+    --ipv6_only`)
 	ipv4Only = flag.Bool("ipv4_only", false, `Optional. Skip all IPv6-specific checks. Mainly useful if one knows
 that IPv6 checks would otherwise fail in benign ways.`)
 	ipv6Only = flag.Bool("ipv6_only", false, `Optional. Skip all IPv4-specific checks. Mainly useful if one knows
@@ -96,11 +103,11 @@ Note that this is an unstable API because check names are prone to change, prefe
 port number, of the load balancer. This is mainly useful if one would like to check the proper setup of a VM and service with respect
 to e.g. DirectPath networking and load balancing, in such a way that ignores DNS SRV resolution. In most use cases, it would be desirable to set this
 in conjunction with --skip="Service SRV DNS queries".`)
-	checkGrpclb                 = flag.Bool("check_grpclb", true, `Optional. Perform checks related to getting backend addresses from grpclb.`)
-	checkXds                    = flag.Bool("check_xds", false, `Optional. Add extra checks to get backend addresses from Traffic Director.`)
+	checkGrpclb                 = flag.Bool("check_grpclb", false, `Optional. Perform checks related to getting backend addresses from grpclb.`)
+	checkXds                    = flag.Bool("check_xds", true, `Optional. Add extra checks to get backend addresses from Traffic Director.`)
 	userAgent                   = flag.String("user_agent", "", "Optional. The user agent header to use on RPCs to the load balancer")
 	trafficDirectorHostname     = flag.String("td_hostname", "directpath-pa.googleapis.com", `Optional. Override the Traffic Director hostname. Do not include a port number.`)
-	xdsExpectFallbackConfigured = flag.Bool("xds_expect_fallback_configured", true, "Optional. Whether or not we expect CFE fallback to be configured for this service in Traffic Director.")
+	xdsExpectFallbackConfigured = flag.Bool("xds_expect_fallback_configured", false, "Optional. Whether or not we expect CFE fallback to be configured for this service in Traffic Director.")
 	infoLog                     = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 	failureCount                int
 	runningOS                   = runtime.GOOS
@@ -110,6 +117,31 @@ type (
 	adsStream     v3adsgrpc.AggregatedDiscoveryService_StreamAggregatedResourcesClient
 	platformError string
 )
+
+// Allow passing an raw literal ip:port address in the --service flag.
+// This behavior can be used in conjunction with the --skip flag to test p2p connectivity.
+func maybeInitBackendAddrsFromFlags(addrLen int) []string {
+	ip, port, err := net.SplitHostPort(*service)
+	if err != nil {
+		return []string{}
+	}
+	s := net.ParseIP(ip)
+	if s == nil {
+		return []string{}
+	}
+	if s.To4() != nil {
+		// IPv4
+		if addrLen == net.IPv4len {
+			return []string{net.JoinHostPort(ip, port)}
+		}
+		return []string{}
+	}
+	// IPv6
+	if addrLen == net.IPv6len {
+		return []string{net.JoinHostPort(ip, port)}
+	}
+	return []string{}
+}
 
 // Route an interface that is platform agnostic which provides a string representation
 // of the dst route.
@@ -134,7 +166,7 @@ const (
 
 	trafficDirectorPort             = "443"
 	userAgentName                   = "dp-check"
-	userAgentVersion                = "1.9"
+	userAgentVersion                = "1.5-dev"
 	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
 	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
 	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
@@ -364,7 +396,7 @@ func getBackendAddrsFromGrpclb(lbAddr string, balancerHostname string, srvQuerie
 		return nil, fmt.Errorf("failed to create grpc connection to balancer: %v", err)
 	}
 	infoLog.Printf("Successfully dialed balancer. Now send initial grpc request...")
-	lbClient := lbpb.NewLoadBalancerClient(conn)
+	lbClient := lbgrpc.NewLoadBalancerClient(conn)
 	stream, err := lbClient.BalanceLoad(ctx)
 	initReq := &lbpb.LoadBalanceRequest{
 		LoadBalanceRequestType: &lbpb.LoadBalanceRequest_InitialRequest{
@@ -1168,7 +1200,9 @@ func main() {
 	// Check DNS
 	srvQueriesSucceeded := false
 	runCheck("Service SRV DNS queries", func() error {
-		// TODO(apolcyn): Ideally we'd skip this if --check_grpclb=false, but we need it to autodetect the IPv6-only vs. dualstack status of the service.
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
+		}
 		infoLog.Printf("Lookup service SRV records with:|net.DefaultResolver.LoookupSRV(context.Background(), \"grpclb\", \"tcp\", \"%v\")|...", *service)
 		_, srvs, err := net.DefaultResolver.LookupSRV(context.Background(), "grpclb", "tcp", *service)
 		if err != nil || len(srvs) == 0 {
@@ -1192,7 +1226,7 @@ See results of LB query below which may give help in diagnosing which case we fa
 		}
 		if len(*balancerTargetOverride) == 0 {
 			balancerHostname = srvs[0].Target
-			if balancerHostname == loadBalancerIPv6OnlyDNS && explicitChecks == 0 {
+			if balancerHostname == loadBalancerIPv6OnlyDNS && explicitChecks == 0 && !*checkXds {
 				skipIPv4Err = fmt.Errorf("%v was detected to be an IPv6-only service because it's DirectPath SRV record pointed to: %v, so DirectPath/IPv4 does not need to work from this VM. Set the flag --ipv4_and_v6 if you want to run this check anyways", *service, loadBalancerIPv6OnlyDNS)
 			}
 			balancerPort = strconv.Itoa(int(srvs[0].Port))
@@ -1234,7 +1268,9 @@ This is unexpected for both IPv6-only and dualstack DirectPath services. Either 
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
 		}
-		// TODO(apolcyn): Ideally we'd skip this if --check_grpclb=false, but we need it to perform local IPv4 routing checks
+		if skipGrpclbErr != nil {
+			return &skipCheckError{err: skipGrpclbErr}
+		}
 		var err error
 		infoLog.Printf("Resolve LB IPv6 addrs with:|new(net.Resolver).LookupIP(context.Background(), \"ip4\", \"%v\")|...", balancerHostname)
 		ipv4BalancerIPs, err = new(net.Resolver).LookupIP(context.Background(), "ip4", balancerHostname)
@@ -1293,7 +1329,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
 		}
-		return checkLocalIPv4Routes(directPathIPv4NetworkInterface, ipv4FromMetadataServer, ipv4BalancerIPs, balancerPort)
+		return checkLocalIPv4Routes(directPathIPv4NetworkInterface, ipv4FromMetadataServer, []net.IP{net.IPv4(34, 126, 0, 0)}, "1")
 	})
 
 	// Contact LBs
@@ -1337,7 +1373,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 	})
 
 	// Resolve backends
-	var ipv6BackendAddrs []string
+	ipv6BackendAddrs := maybeInitBackendAddrsFromFlags(net.IPv6len)
 	runCheck("Discovery of IPv6 backends via load balancers", func() error {
 		if skipIPv6Err != nil {
 			return &skipCheckError{err: skipIPv6Err}
@@ -1352,7 +1388,7 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		ipv6BackendAddrs, err = resolveBackends(net.JoinHostPort(ipv6BalancerIPs[0].String(), balancerPort), balancerHostname, srvQueriesSucceeded)
 		return err
 	})
-	var ipv4BackendAddrs []string
+	ipv4BackendAddrs := maybeInitBackendAddrsFromFlags(net.IPv4len)
 	runCheck("Discovery of IPv4 backends via load balancers", func() error {
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
