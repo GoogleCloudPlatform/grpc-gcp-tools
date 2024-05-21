@@ -166,7 +166,7 @@ const (
 
 	trafficDirectorPort             = "443"
 	userAgentName                   = "dp-check"
-	userAgentVersion                = "1.10"
+	userAgentVersion                = "1.11"
 	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
 	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
 	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
@@ -1103,9 +1103,19 @@ func getBackendAddrsFromTrafficDirector(ipv6Capable bool) ([]string, error) {
 	return xdsBackendAddrs, nil
 }
 
+func maybeOverrideFlags() {
+	const spannerSuffix = "spanner.googleapis.com"
+	if strings.HasSuffix(spannerSuffix, *service) {
+		// expect fallback configured for .*spanner.googleapis.com
+		infoLog.Printf("overriding flag --xds_expect_fallback_configured to true because --service ends with %s, previous setting: %v", spannerSuffix, *xdsExpectFallbackConfigured)
+		*xdsExpectFallbackConfigured = true
+	}
+}
+
 func main() {
 	flag.Parse()
 	infoLog.Printf("Running dp_check: service=%s, ipv4_only=%v, ipv6_only=%v, ipv4_and_v6=%v, check_grpclb=%v, check_xds=%v, td_endpoint=%s, xds_expect_fallback_configured=%v\n", *service, *ipv4Only, *ipv6Only, *ipv4AndV6, *checkGrpclb, *checkXds, *trafficDirectorHostname, *xdsExpectFallbackConfigured)
+	maybeOverrideFlags()
 	if len(*service) == 0 {
 		panic("--service not set")
 	}
