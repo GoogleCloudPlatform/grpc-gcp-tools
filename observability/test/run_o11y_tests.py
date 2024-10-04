@@ -1050,11 +1050,11 @@ class TestCaseImpl(unittest.TestCase):
         self.enable_client_trace({
             'sampling_rate': 0.50
         })
-        # Make 20 UnaryCall's
-        self.setup_and_run_rpc([InteropAction('large_unary', num_times = 20)])
+        # Make 100 UnaryCall's
+        self.setup_and_run_rpc([InteropAction('large_unary', num_times = 100)])
         trace_results = CloudTraceInterface.query_traces_from_cloud(self)
-        # With 50%, we should get 5-15 traces with 98.8% probability
-        trace_results.test_traces_count_range(5, 15)
+        # With 50%, we should get 30-70 traces with > 99.99% probability
+        trace_results.test_traces_count_range(30, 70)
 
     def test_configs_env_var(self) -> None:
         self.enable_all_config()
