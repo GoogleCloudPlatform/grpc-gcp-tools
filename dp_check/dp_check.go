@@ -1212,12 +1212,11 @@ func main() {
 		}
 		if ip.To4() != nil {
 			// Override uses IPv4, skip IPv6
-			os.Exit(1)
 			if *ipv6Only {
 				infoLog.Printf("ERROR: --backend_address_override=%v is IPv4, but --ipv6_only is set", *backendAddressOverride)
 				os.Exit(1)
 			}
-			infoLog.Printf("ERROR: --backend_address_override=%v is IPv4, skipping IPv6 checks", *backendAddressOverride)
+			infoLog.Printf("--backend_address_override=%v is IPv4, skipping IPv6 checks", *backendAddressOverride)
 			skipIPv6Err = fmt.Errorf("skip IPv6 checks because --backend_address_override=%v is IPv4", *backendAddressOverride)
 		} else {
 			// Override uses IPv6, skip IPv4
@@ -1225,7 +1224,7 @@ func main() {
 				infoLog.Printf("ERROR: --backend_address_override=%v is IPv6, but --ipv4_only is set", *backendAddressOverride)
 				os.Exit(1)
 			}
-			infoLog.Printf("ERROR: --backend_address_override=%v is IPv6, skipping IPv4 checks", *backendAddressOverride)
+			infoLog.Printf("--backend_address_override=%v is IPv6, skipping IPv4 checks", *backendAddressOverride)
 			skipIPv4Err = fmt.Errorf("skip IPv4 checks because --backend_address_override=%v is IPv6", *backendAddressOverride)
 		}
 	}
