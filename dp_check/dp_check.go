@@ -45,7 +45,6 @@ import (
 	"syscall"
 	"time"
 
-	// TODO(apolcyn): depend on a canonical version of grpclb protos
 	"google.golang.org/grpc"
 	lbgrpc "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
 	lbpb "google.golang.org/grpc/balancer/grpclb/grpc_lb_v1"
@@ -78,13 +77,7 @@ import (
 )
 
 var (
-	service = flag.String("service", "", `Required. The public DirectPath-enabled DNS of the service to check.
-
-Note: this can also be a literal IP:port address. In this case, use the --skip flag to skip load balancer interactions, and
-set --ipv4_only or --ipv6_only depending on whether the literal is IPv4 or IPv6, respectively. For example, if the
-literal is an IPv6 address, use flags:
-    --skip="Service SRV DNS queries,TCP/IPv6 connectivity to load balancers,Discovery of IPv6 backends via load balancers"
-    --ipv6_only`)
+	service  = flag.String("service", "", "Required. The public DirectPath-enabled DNS of the service to check.")
 	ipv4Only = flag.Bool("ipv4_only", false, `Optional. Skip all IPv6-specific checks. Mainly useful if one knows
 that IPv6 checks would otherwise fail in benign ways.`)
 	ipv6Only = flag.Bool("ipv6_only", false, `Optional. Skip all IPv4-specific checks. Mainly useful if one knows
@@ -103,6 +96,12 @@ Note that this is an unstable API because check names are prone to change, prefe
 port number, of the load balancer. This is mainly useful if one would like to check the proper setup of a VM and service with respect
 to e.g. DirectPath networking and load balancing, in such a way that ignores DNS SRV resolution. In most use cases, it would be desirable to set this
 in conjunction with --skip="Service SRV DNS queries".`)
+	backendAddressOverride = flag.String("backend_address_override", "", `Optional. IP and port of a backend.
+This is mainly useful for testing connectivity with a specific backend task, regardless of what the load balancer returns.
+Note that setting this flag has the effect of skipping all load balancer interactions.`)
+	ipv6CapableNodeMetadataOverride = flag.String("ipv6_capable_node_metadata_override", "", `Optional. The value of the TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE XDS node metadata to use.
+This is mainly useful for testing operation with a given service with varying values of the TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE XDS node metadata.
+The following values are supported: "true", "false", "" (empty string, the default, in which the node metadata is set automatically)`)
 	checkGrpclb                 = flag.Bool("check_grpclb", false, `Optional. Perform checks related to getting backend addresses from grpclb.`)
 	checkXds                    = flag.Bool("check_xds", true, `Optional. Add extra checks to get backend addresses from Traffic Director.`)
 	userAgent                   = flag.String("user_agent", "", "Optional. The user agent header to use on RPCs to the load balancer")
@@ -117,31 +116,6 @@ type (
 	adsStream     v3adsgrpc.AggregatedDiscoveryService_StreamAggregatedResourcesClient
 	platformError string
 )
-
-// Allow passing an raw literal ip:port address in the --service flag.
-// This behavior can be used in conjunction with the --skip flag to test p2p connectivity.
-func maybeInitBackendAddrsFromFlags(addrLen int) []string {
-	ip, port, err := net.SplitHostPort(*service)
-	if err != nil {
-		return []string{}
-	}
-	s := net.ParseIP(ip)
-	if s == nil {
-		return []string{}
-	}
-	if s.To4() != nil {
-		// IPv4
-		if addrLen == net.IPv4len {
-			return []string{net.JoinHostPort(ip, port)}
-		}
-		return []string{}
-	}
-	// IPv6
-	if addrLen == net.IPv6len {
-		return []string{net.JoinHostPort(ip, port)}
-	}
-	return []string{}
-}
 
 // Route an interface that is platform agnostic which provides a string representation
 // of the dst route.
@@ -166,7 +140,7 @@ const (
 
 	trafficDirectorPort             = "443"
 	userAgentName                   = "dp-check"
-	userAgentVersion                = "1.11"
+	userAgentVersion                = "1.5-dev"
 	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
 	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
 	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
@@ -321,34 +295,60 @@ func checkLocalIPv4Addresses(ipv4FromMetadataServer *net.IP) (*net.Interface, er
 	return iface, nil
 }
 
-func checkLocalIPv6Routes(directPathIPv6NetworkInterface *net.Interface) error {
-	if directPathIPv6NetworkInterface == nil {
-		return fmt.Errorf("skipping IPv6 routes check because there is no valid directpath IPv6 network interface on this machine")
+func checkLocalIPv6Routes(localAddress *net.IP, backendAddress string) error {
+	destIPStr, destPort, err := net.SplitHostPort(backendAddress)
+	if err != nil {
+		return fmt.Errorf("failed to split backend address: %v into host and port components", backendAddress)
 	}
-	const route = "2001:4860:8040::/42"
-	infoLog.Printf("Search for an IPv6 route on network interface: %v matching: %v", directPathIPv6NetworkInterface.Name, route)
-	if err := findLocalRoute(*directPathIPv6NetworkInterface, net.IPv6len, func(r Route) bool {
-		return strings.Contains(r.String(), route)
-	}); err != nil {
-		return fmt.Errorf("Missing route prefix to backends: 2001:4860:8040::/42. IPv6 route setup likely either failed or hasn't been attempted. err: %v", err)
+	destIP := net.ParseIP(destIPStr)
+	if destIP == nil {
+		return fmt.Errorf("failed to parse IP component of backend address: %v", backendAddress)
+	}
+	if destIP.To4() != nil {
+		return fmt.Errorf("backend address %v is not an IPv6 address", backendAddress)
+	}
+	sourceStr := net.JoinHostPort(localAddress.String(), "0")
+	infoLog.Printf("Check kernel routability of DirectPath/IPv6 by opening a UDP socket, binding it to %v and calling connect for %v", sourceStr, backendAddress)
+	// Also see https://github.com/golang/go/issues/10552#issuecomment-115540597 for this strategy.
+	fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
+	if err != nil {
+		return fmt.Errorf("error creating IPv6/UDP socket: %v", err)
+	}
+	source := &syscall.SockaddrInet6{Port: 0}
+	for i := 0; i < 16; i++ {
+		source.Addr[i] = (*localAddress)[i]
+	}
+	if err := syscall.Bind(fd, source); err != nil {
+		return fmt.Errorf("error binding UDP/IPV6 socket to %v: %v", sourceStr, err)
+	}
+	port, err := strconv.Atoi(destPort)
+	if err != nil {
+		return fmt.Errorf("failed to convert port %v to int: %v", destPort, err)
+	}
+	dest := &syscall.SockaddrInet6{Port: port}
+	for i := 0; i < 16; i++ {
+		dest.Addr[i] = destIP[i]
+	}
+	if err := syscall.Connect(fd, dest); err != nil {
+		return fmt.Errorf("failed to connect UDP socket (source: %v) to dest: %v, err: %v. This indicates the DirectPath/IPv6 backends aren't routable from this VM", sourceStr, backendAddress, err)
 	}
 	return nil
 }
 
-func checkLocalIPv4Routes(directPathIPv4NetworkInterface *net.Interface, ipv4FromMetadataServer *net.IP, ipv4BalancerIPs []net.IP, balancerPort string) error {
-	if directPathIPv4NetworkInterface == nil {
-		return fmt.Errorf("skipping IPv4 routes check because there is not valid DirectPath IPv4 network interface on this machine")
+func checkLocalIPv4Routes(localAddress *net.IP, backendAddress string) error {
+	destIPStr, destPort, err := net.SplitHostPort(backendAddress)
+	if err != nil {
+		return fmt.Errorf("failed to split backend address: %v into host and port components", backendAddress)
 	}
-	if len(ipv4BalancerIPs) == 0 {
-		return fmt.Errorf("skipping IPv4 routes check because we didn't find any IPv4 load balancer addresses")
+	destIP := net.ParseIP(destIPStr)
+	if destIP == nil {
+		return fmt.Errorf("failed to parse IP component of backend address: %v", backendAddress)
 	}
-	// First just log the routes on the candidate interface
-	if err := findLocalRoute(*directPathIPv4NetworkInterface, net.IPv4len, func(r Route) bool { return true }); err != nil {
-		return err
+	if destIP.To4() == nil {
+		return fmt.Errorf("backend address %v is not an IPv4 address", backendAddress)
 	}
-	sourceStr := net.JoinHostPort(ipv4FromMetadataServer.String(), "0")
-	destStr := net.JoinHostPort(ipv4BalancerIPs[0].String(), balancerPort)
-	infoLog.Printf("Check kernel routability of DirectPath/IPv4 by opening a UDP socket, binding it to %v and calling connect for %v", sourceStr, destStr)
+	sourceStr := net.JoinHostPort(localAddress.String(), "0")
+	infoLog.Printf("Check kernel routability of DirectPath/IPv4 by opening a UDP socket, binding it to %v and calling connect for %v", sourceStr, backendAddress)
 	// Also see https://github.com/golang/go/issues/10552#issuecomment-115540597 for this strategy.
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
 	if err != nil {
@@ -356,18 +356,21 @@ func checkLocalIPv4Routes(directPathIPv4NetworkInterface *net.Interface, ipv4Fro
 	}
 	source := &syscall.SockaddrInet4{Port: 0}
 	for i := 0; i < 4; i++ {
-		source.Addr[i] = (*ipv4FromMetadataServer)[i]
+		source.Addr[i] = (*localAddress)[i]
 	}
 	if err := syscall.Bind(fd, source); err != nil {
 		return fmt.Errorf("error binding UDP/IPV4 socket to %v: %v", sourceStr, err)
 	}
-	port, _ := strconv.Atoi(balancerPort)
+	port, err := strconv.Atoi(destPort)
+	if err != nil {
+		return fmt.Errorf("failed to convert port %v to int: %v", destPort, err)
+	}
 	dest := &syscall.SockaddrInet4{Port: port}
 	for i := 0; i < 4; i++ {
-		dest.Addr[i] = ipv4BalancerIPs[0][i]
+		dest.Addr[i] = destIP[i]
 	}
 	if err := syscall.Connect(fd, dest); err != nil {
-		return fmt.Errorf("failed to connect UDP socket (source: %v) to dest: %v, err: %v. This indicates the DirectPath/IPv4 backends aren't routable from this VM", sourceStr, destStr, err)
+		return fmt.Errorf("failed to connect UDP socket (source: %v) to dest: %v, err: %v. This indicates the DirectPath/IPv4 backends aren't routable from this VM", sourceStr, backendAddress, err)
 	}
 	return nil
 }
@@ -428,7 +431,7 @@ func getBackendAddrsFromGrpclb(lbAddr string, balancerHostname string, srvQuerie
 	}
 	initResp := reply.GetInitialResponse()
 	if initResp == nil {
-		return nil, fmt.Errorf("gRPC reply from balancer did not include initial response", err)
+		return nil, fmt.Errorf("gRPC reply from balancer did not include initial response: %v", err)
 	}
 	infoLog.Printf("Successfully received initial grpc response from balancer: |%v|. Now wait for a serverlist...", initResp)
 	// Just wait for the first non-empty server list
@@ -574,7 +577,6 @@ func isRunningOnGCP() (bool, error) {
 	default:
 		return false, platformError(runtime.GOOS)
 	}
-	return false, nil
 }
 
 func checkSecureConnectivityToBackend(address string) error {
@@ -1049,7 +1051,7 @@ func checkEDS(stream adsStream, node *v3corepb.Node, serviceName string, version
 	return xdsBackendAddrs, nil
 }
 
-func getBackendAddrsFromTrafficDirector(ipv6Capable bool) ([]string, error) {
+func getBackendAddrsFromTrafficDirector(addressFamily string) ([]string, error) {
 	// Open a RPC stream to Traffic Director
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
 	defer cancel()
@@ -1061,6 +1063,24 @@ func getBackendAddrsFromTrafficDirector(ipv6Capable bool) ([]string, error) {
 	zone, err := getZone(10 * time.Second)
 	if err != nil {
 		return []string{}, fmt.Errorf("failed to get zone from metadata server: %v", err)
+	}
+	var ipv6Capable bool
+	if *ipv6CapableNodeMetadataOverride != "" {
+		if *ipv6CapableNodeMetadataOverride == "true" {
+			ipv6Capable = true
+		} else if *ipv6CapableNodeMetadataOverride == "false" {
+			ipv6Capable = false
+		} else {
+			return []string{}, fmt.Errorf("invalid value for --ipv6_capable_node_metadata_override: %v", *ipv6CapableNodeMetadataOverride)
+		}
+	} else {
+		if addressFamily == "IPv6" {
+			ipv6Capable = true
+		} else if addressFamily == "IPv4" {
+			ipv6Capable = false
+		} else {
+			return []string{}, fmt.Errorf("invalid address family: %v", addressFamily)
+		}
 	}
 	node := newNode(zone, ipv6Capable)
 	// XDS
@@ -1091,25 +1111,49 @@ func getBackendAddrsFromTrafficDirector(ipv6Capable bool) ([]string, error) {
 	if err != nil {
 		return []string{}, fmt.Errorf("EDS failed: %v", err)
 	}
-	var ipVersion string
-	if ipv6Capable {
-		ipVersion = "IPv6"
-	} else {
-		ipVersion = "IPv4"
-	}
 	for _, backend := range xdsBackendAddrs {
-		infoLog.Printf("Found %v backend address from Traffic Director: |%v|", ipVersion, backend)
+		// check if the backend address is of the expected address family
+		if addressFamily == "IPv4" {
+			ip, err := parseAddress(backend)
+			if err != nil {
+				return []string{}, fmt.Errorf("failed to parse backend address %v: %v", backend, err)
+			}
+			if ip.To4() == nil {
+				return []string{}, fmt.Errorf("backend address %v is not IPv4", backend)
+			}
+		} else if addressFamily == "IPv6" {
+			ip, err := parseAddress(backend)
+			if err != nil {
+				return []string{}, fmt.Errorf("failed to parse backend address %v: %v", backend, err)
+			}
+			if ip.To4() != nil {
+				return []string{}, fmt.Errorf("backend address %v is not IPv6", backend)
+			}
+		}
+		infoLog.Printf("Found %v backend address from Traffic Director: |%v|", addressFamily, backend)
 	}
 	return xdsBackendAddrs, nil
 }
 
 func maybeOverrideFlags() {
 	const spannerSuffix = "spanner.googleapis.com"
-	if strings.HasSuffix(spannerSuffix, *service) {
-		// expect fallback configured for .*spanner.googleapis.com
-		infoLog.Printf("overriding flag --xds_expect_fallback_configured to true because --service ends with %s, previous setting: %v", spannerSuffix, *xdsExpectFallbackConfigured)
+	const bigtableSuffix = "bigtable.googleapis.com"
+	if strings.HasSuffix(*service, spannerSuffix) || strings.HasSuffix(*service, bigtableSuffix) {
+		infoLog.Printf("overriding flag --xds_expect_fallback_configured to true because --service ends with %s or %s, previous setting: %v", spannerSuffix, bigtableSuffix, *xdsExpectFallbackConfigured)
 		*xdsExpectFallbackConfigured = true
 	}
+}
+
+func parseAddress(address string) (net.IP, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to split %v into host and port: %v", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, fmt.Errorf("failed to parse %v into an IP: %v", host, err)
+	}
+	return ip, nil
 }
 
 func main() {
@@ -1157,6 +1201,31 @@ func main() {
 		if net.ParseIP(balancerHostname) != nil {
 			infoLog.Printf("ERROR: --balancer_target_override was set to %v, but this flag does not support IP literal based addresses, the host must be a DNS hostname", *balancerTargetOverride)
 			os.Exit(1)
+		}
+	}
+	if *backendAddressOverride != "" {
+		infoLog.Printf("Flag --backend_address_override is non-empty. Will use it as a backend address, skipping XDS load balancer interactions")
+		ip, err := parseAddress(*backendAddressOverride)
+		if err != nil {
+			infoLog.Printf("ERROR: problem with --backend_address_override=%v - %v", *backendAddressOverride, err)
+			os.Exit(1)
+		}
+		if ip.To4() != nil {
+			// Override uses IPv4, skip IPv6
+			if *ipv6Only {
+				infoLog.Printf("ERROR: --backend_address_override=%v is IPv4, but --ipv6_only is set", *backendAddressOverride)
+				os.Exit(1)
+			}
+			infoLog.Printf("--backend_address_override=%v is IPv4, skipping IPv6 checks", *backendAddressOverride)
+			skipIPv6Err = fmt.Errorf("skip IPv6 checks because --backend_address_override=%v is IPv4", *backendAddressOverride)
+		} else {
+			// Override uses IPv6, skip IPv4
+			if *ipv4Only {
+				infoLog.Printf("ERROR: --backend_address_override=%v is IPv6, but --ipv4_only is set", *backendAddressOverride)
+				os.Exit(1)
+			}
+			infoLog.Printf("--backend_address_override=%v is IPv6, skipping IPv4 checks", *backendAddressOverride)
+			skipIPv4Err = fmt.Errorf("skip IPv4 checks because --backend_address_override=%v is IPv6", *backendAddressOverride)
 		}
 	}
 	if syscall.Getuid() != 0 {
@@ -1329,19 +1398,6 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		directPathIPv4NetworkInterface, err = checkLocalIPv4Addresses(ipv4FromMetadataServer)
 		return err
 	})
-	runCheck("Local IPv6 routes", func() error {
-		if skipIPv6Err != nil {
-			return &skipCheckError{err: skipIPv6Err}
-		}
-		return checkLocalIPv6Routes(directPathIPv6NetworkInterface)
-	})
-	runCheck("Local IPv4 routes", func() error {
-		if skipIPv4Err != nil {
-			return &skipCheckError{err: skipIPv4Err}
-		}
-		return checkLocalIPv4Routes(directPathIPv4NetworkInterface, ipv4FromMetadataServer, []net.IP{net.IPv4(34, 126, 0, 0)}, "1")
-	})
-
 	// Contact LBs
 	tcpOverIPv6ToLoadBalancersSucceeded := false
 	runCheck("TCP/IPv6 connectivity to load balancers", func() error {
@@ -1383,13 +1439,17 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 	})
 
 	// Resolve backends
-	ipv6BackendAddrs := maybeInitBackendAddrsFromFlags(net.IPv6len)
+	var ipv6BackendAddrs []string
 	runCheck("Discovery of IPv6 backends via load balancers", func() error {
 		if skipIPv6Err != nil {
 			return &skipCheckError{err: skipIPv6Err}
 		}
 		if skipGrpclbErr != nil {
 			return &skipCheckError{err: skipGrpclbErr}
+		}
+		if *backendAddressOverride != "" {
+			ipv6BackendAddrs = []string{*backendAddressOverride}
+			return &skipCheckError{err: errors.New("skipping discovery of backends via load balancers because --backend_address_override is set")}
 		}
 		if !tcpOverIPv6ToLoadBalancersSucceeded {
 			return fmt.Errorf("skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
@@ -1398,13 +1458,17 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		ipv6BackendAddrs, err = resolveBackends(net.JoinHostPort(ipv6BalancerIPs[0].String(), balancerPort), balancerHostname, srvQueriesSucceeded)
 		return err
 	})
-	ipv4BackendAddrs := maybeInitBackendAddrsFromFlags(net.IPv4len)
+	var ipv4BackendAddrs []string
 	runCheck("Discovery of IPv4 backends via load balancers", func() error {
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
 		}
 		if skipGrpclbErr != nil {
 			return &skipCheckError{err: skipGrpclbErr}
+		}
+		if *backendAddressOverride != "" {
+			ipv4BackendAddrs = []string{*backendAddressOverride}
+			return &skipCheckError{err: errors.New("skipping discovery of backends via load balancers because --backend_address_override is set")}
 		}
 		if !tcpOverIPv4ToLoadBalancersSucceeded {
 			return fmt.Errorf("skipping discovery of backends via load balancers because TCP connectivity to LBs failed")
@@ -1487,8 +1551,12 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		if skipIPv6Err != nil {
 			return &skipCheckError{err: skipIPv6Err}
 		}
+		if *backendAddressOverride != "" {
+			xdsIPv6BackendAddrs = []string{*backendAddressOverride}
+			return &skipCheckError{err: errors.New("skipping xds IPv6 backend address discovery because --backend_address_override is set")}
+		}
 		var err error
-		xdsIPv6BackendAddrs, err = getBackendAddrsFromTrafficDirector(true)
+		xdsIPv6BackendAddrs, err = getBackendAddrsFromTrafficDirector("IPv6")
 		return err
 	})
 
@@ -1500,11 +1568,52 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 		if skipIPv4Err != nil {
 			return &skipCheckError{err: skipIPv4Err}
 		}
+		if *backendAddressOverride != "" {
+			xdsIPv4BackendAddrs = []string{*backendAddressOverride}
+			return &skipCheckError{err: errors.New("skipping xds IPv4 backend address discovery because --backend_address_override is set")}
+		}
 		var err error
-		xdsIPv4BackendAddrs, err = getBackendAddrsFromTrafficDirector(false)
+		xdsIPv4BackendAddrs, err = getBackendAddrsFromTrafficDirector("IPv4")
 		return err
 	})
-
+	runCheck("Local IPv6 routes", func() error {
+		if skipIPv6Err != nil {
+			return &skipCheckError{err: skipIPv6Err}
+		}
+		if directPathIPv6NetworkInterface != nil {
+			if err := logLocalRoutes(*directPathIPv6NetworkInterface, net.IPv6len); err != nil {
+				infoLog.Printf("Error logging IPv6 routes on %v: %v", *directPathIPv6NetworkInterface, err)
+			}
+		}
+		var addr string
+		if len(xdsIPv6BackendAddrs) != 0 {
+			addr = xdsIPv6BackendAddrs[0]
+		} else if len(ipv6BackendAddrs) != 0 {
+			addr = ipv6BackendAddrs[0]
+		} else {
+			return fmt.Errorf("skipping local IPv6 routes check b/c we did not discover any IPv6 backends")
+		}
+		return checkLocalIPv6Routes(ipv6FromMetadataServer, addr)
+	})
+	runCheck("Local IPv4 routes", func() error {
+		if skipIPv4Err != nil {
+			return &skipCheckError{err: skipIPv4Err}
+		}
+		if directPathIPv4NetworkInterface != nil {
+			if err := logLocalRoutes(*directPathIPv4NetworkInterface, net.IPv4len); err != nil {
+				infoLog.Printf("Error logging IPv4 routes on %v: %v", *directPathIPv4NetworkInterface, err)
+			}
+		}
+		var addr string
+		if len(xdsIPv4BackendAddrs) != 0 {
+			addr = xdsIPv4BackendAddrs[0]
+		} else if len(ipv4BackendAddrs) != 0 {
+			addr = ipv4BackendAddrs[0]
+		} else {
+			return fmt.Errorf("skipping local IPv4 routes check b/c we did not discover any IPv4 backends")
+		}
+		return checkLocalIPv4Routes(ipv4FromMetadataServer, addr)
+	})
 	xdsTCPConnectivityToIpv6BackendSucceeded := false
 	runCheck("TCP connectivity to IPv6 backends from Traffic Director", func() error {
 		if skipXdsErr != nil {
