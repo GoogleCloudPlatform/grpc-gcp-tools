@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net"
 
-	"google3/third_party/golang/netlink/netlink"
+	"github.com/vishvananda/netlink"
 )
 
 type netlinkRoute struct {
