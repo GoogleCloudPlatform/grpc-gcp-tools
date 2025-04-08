@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/vishvananda/netlink"
+	"google3/third_party/golang/netlink/netlink"
 )
 
 type netlinkRoute struct {
@@ -18,7 +18,7 @@ func (n *netlinkRoute) String() string {
 	return n.Dst.String()
 }
 
-func findLocalRoute(iface net.Interface, addrFamilyLen int, routeMatches func(r Route) bool) error {
+func logLocalRoutes(iface net.Interface, addrFamilyLen int) error {
 	var addrFamilyStr string
 	var netLinkFamily int
 	if addrFamilyLen == net.IPv4len {
@@ -30,7 +30,7 @@ func findLocalRoute(iface net.Interface, addrFamilyLen int, routeMatches func(r 
 	} else {
 		return fmt.Errorf("Invalid address family length %v is not IPv4 or IPv6", addrFamilyLen)
 	}
-	infoLog.Printf("Check all %v routes on network interface |Name: %s, hardware address: %s, flags: %s| returned by |netlink.LinkByName(%s)|", addrFamilyStr, iface.Name, iface.HardwareAddr, iface.Flags, iface.Name)
+	infoLog.Printf("List all %v routes on network interface |Name: %s, hardware address: %s, flags: %s| returned by |netlink.LinkByName(%s)|", addrFamilyStr, iface.Name, iface.HardwareAddr, iface.Flags, iface.Name)
 	link, err := netlink.LinkByName(iface.Name)
 	if err != nil {
 		return err
@@ -39,15 +39,8 @@ func findLocalRoute(iface net.Interface, addrFamilyLen int, routeMatches func(r 
 	if err != nil {
 		return fmt.Errorf("\"RouteList(link, addrFamily)\" failed: %v", err)
 	}
-	foundMatch := false
 	for _, r := range rl {
 		infoLog.Printf("Found %v route: |%s| on network interface |%s|", netLinkFamily, r, iface.Name)
-		if routeMatches(&netlinkRoute{r}) {
-			foundMatch = true
-		}
-	}
-	if !foundMatch {
-		return fmt.Errorf("failed to find matching route")
 	}
 	return nil
 }

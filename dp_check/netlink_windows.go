@@ -7,7 +7,7 @@ import (
 	"net"
 )
 
-func findLocalRoute(iface net.Interface, addrFamilyLen int, routeMatches func(r Route) bool) error {
-	infoLog.Printf("Skipping local route checks for Windows")
+func logLocalRoutes(iface net.Interface, addrFamilyLen int) error {
+	infoLog.Printf("Skipping local route logging for Windows")
 	return nil
 }
