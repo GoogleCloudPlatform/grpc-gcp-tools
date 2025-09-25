@@ -110,6 +110,7 @@ The following values are supported: "true", "false", "" (empty string, the defau
 	infoLog                     = log.New(os.Stderr, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 	failureCount                int
 	runningOS                   = runtime.GOOS
+	enableDualstackEndpoints    = flag.Bool("enable_dualstack_endpoints", true, "Whether or not to enable XDS dualstack endpoints.")
 )
 
 type (
@@ -121,6 +122,11 @@ type (
 // of the dst route.
 type Route interface {
 	String() string
+}
+
+type xdsEndpoint struct {
+	primaryAddr   string // IPv6 or IPv4, but always IPv6 if secondaryAddr is non-empty
+	secondaryAddr string // always IPv4 if non-empty
 }
 
 func (k platformError) Error() string {
@@ -144,6 +150,8 @@ const (
 	clientFeatureNoOverprovisioning = "envoy.lb.does_not_support_overprovisioning"
 	ipv6CapableMetadataName         = "TRAFFICDIRECTOR_DIRECTPATH_C2P_IPV6_CAPABLE"
 	zoneURL                         = "http://metadata.google.internal/computeMetadata/v1/instance/zone"
+	instanceIDURL                   = "http://metadata.google.internal/computeMetadata/v1/instance/id"
+	projectNumberURL                = "http://metadata.google.internal/computeMetadata/v1/project/numeric-project-id"
 	// V3ListenerURL is typeURL of v3 xDS Listener
 	V3ListenerURL = "type.googleapis.com/envoy.config.listener.v3.Listener"
 	// V3RouteConfigURL is typeURL of v3 xDS RouteConfiguration
@@ -156,6 +164,27 @@ const (
 
 type skipCheckError struct {
 	err error
+}
+
+type addressPreference int
+
+const (
+	dualstack addressPreference = iota
+	ipv4
+	ipv6
+)
+
+func (p addressPreference) String() string {
+	switch p {
+	case dualstack:
+		return "IPv4AndV6"
+	case ipv4:
+		return "IPv4"
+	case ipv6:
+		return "IPv6"
+	default:
+		return "Unknown"
+	}
 }
 
 func (s *skipCheckError) Error() string {
@@ -296,6 +325,9 @@ func checkLocalIPv4Addresses(ipv4FromMetadataServer *net.IP) (*net.Interface, er
 }
 
 func checkLocalIPv6Routes(localAddress *net.IP, backendAddress string) error {
+	if localAddress == nil {
+		return fmt.Errorf("skipping search for DirectPath-capable IPv6 routes because we did not find a valid IPv6 address from metadata server")
+	}
 	destIPStr, destPort, err := net.SplitHostPort(backendAddress)
 	if err != nil {
 		return fmt.Errorf("failed to split backend address: %v into host and port components", backendAddress)
@@ -336,6 +368,9 @@ func checkLocalIPv6Routes(localAddress *net.IP, backendAddress string) error {
 }
 
 func checkLocalIPv4Routes(localAddress *net.IP, backendAddress string) error {
+	if localAddress == nil {
+		return fmt.Errorf("skipping search for DirectPath-capable IPv4 routes because we did not find a valid IPv4 address from metadata server")
+	}
 	destIPStr, destPort, err := net.SplitHostPort(backendAddress)
 	if err != nil {
 		return fmt.Errorf("failed to split backend address: %v into host and port components", backendAddress)
@@ -471,7 +506,7 @@ func getBackendAddrsFromGrpclb(lbAddr string, balancerHostname string, srvQuerie
 }
 
 func resolveBackends(balancerAddress string, balancerHostname string, srvQueriesSucceeded bool) ([]string, error) {
-	var addressFamily string
+	var addressFamily addressPreference
 	var matchAddrFamily func(net.IP) bool
 	balancerHost, _, err := net.SplitHostPort(balancerAddress)
 	if err != nil {
@@ -482,10 +517,10 @@ func resolveBackends(balancerAddress string, balancerHostname string, srvQueries
 		return nil, fmt.Errorf("failed to parse IP component of balancer address: %v", balancerAddress)
 	}
 	if balancerIP.To4() != nil {
-		addressFamily = "IPv4"
+		addressFamily = ipv4
 		matchAddrFamily = func(ip net.IP) bool { return ip.To4() != nil }
 	} else if balancerIP.To16() != nil {
-		addressFamily = "IPv6"
+		addressFamily = ipv6
 		matchAddrFamily = func(ip net.IP) bool { return ip.To16() != nil }
 	} else {
 		return nil, fmt.Errorf("balancer IP: %v not recognized as IPv4 or IPv6", balancerIP)
@@ -503,13 +538,13 @@ in order to get more debug logs from the grpc library (which was just used when 
 		infoLog.Printf(`Because we received an assignment from the load balancer, it's unexpected that earlier SRV queries failed. However, one possible reason is that the service is in the process of denying some attributes of this specific VM (for example the VPC network project number of this VM's primary network interface, the VM project number, or the current region or zone we're running in), and that the load balancer will start to respond to our BalanceLoad RPCs for %s with FallbackResponse messages soon.`, *service)
 	}
 	for _, addr := range backends {
-		infoLog.Printf("Found %v backend address:|%v|", addressFamily, addr)
+		infoLog.Printf("Found %s backend address:|%v|", addressFamily, addr)
 		ipStr, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to split %v into ip and port components: %v", addr, err)
 		}
 		if ip := net.ParseIP(ipStr); ip == nil || !matchAddrFamily(ip) {
-			return nil, fmt.Errorf("ip %v from address %v was not recognized as a valid %v address", ipStr, addr, addressFamily)
+			return nil, fmt.Errorf("ip %v from address %v was not recognized as a valid %s address", ipStr, addr, addressFamily)
 		}
 	}
 	return backends, nil
@@ -704,7 +739,7 @@ func ackXdsResponse(stream adsStream, node *v3corepb.Node, typeURL, resourceName
 }
 
 // Extract cluster_name from LDS response
-func processLdsResponse(ldsReply *v3discoverypb.DiscoveryResponse) (string, error) {
+func processLdsResponse(ldsReply *v3discoverypb.DiscoveryResponse, requestedResource string) (string, error) {
 	if len(ldsReply.GetResources()) == 0 {
 		return "", fmt.Errorf("no listener resource received in LDS response")
 	}
@@ -716,7 +751,7 @@ func processLdsResponse(ldsReply *v3discoverypb.DiscoveryResponse) (string, erro
 	if err := proto.Unmarshal(resource.GetValue(), lis); err != nil {
 		return "", fmt.Errorf("failed to unmarshal listener resource from LDS response: %v", err)
 	}
-	if lis.GetName() != *service {
+	if lis.GetName() != requestedResource {
 		return "", fmt.Errorf("listener resource name |%v| does not match |%v|", lis.GetName(), *service)
 	}
 	apiLis := &v3httppb.HttpConnectionManager{}
@@ -873,19 +908,19 @@ func processDNSClusterResponse(cdsReply *v3discoverypb.DiscoveryResponse, cluste
 }
 
 // Extract backend IP:port from RDS response
-func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, error) {
+func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]xdsEndpoint, error) {
 	if len(edsReply.GetResources()) != 1 {
 		if len(edsReply.GetResources()) == 0 {
-			return []string{}, fmt.Errorf("no cluster_load_assignment resource received in EDS response")
+			return []xdsEndpoint{}, fmt.Errorf("no cluster_load_assignment resource received in EDS response")
 		}
-		return []string{}, fmt.Errorf("expect to receive only 1 cluster_load_assigment resource in EDS response, but received %v", len(edsReply.GetResources()))
+		return []xdsEndpoint{}, fmt.Errorf("expect to receive only 1 cluster_load_assigment resource in EDS response, but received %v", len(edsReply.GetResources()))
 	}
 	resource := edsReply.GetResources()[0]
 	clusterLoadAssignment := &v3endpointpb.ClusterLoadAssignment{}
 	if err := proto.Unmarshal(resource.GetValue(), clusterLoadAssignment); err != nil {
-		return []string{}, fmt.Errorf("failed to unmarshal cluster_load_assigement resource from EDS response: %v", err)
+		return []xdsEndpoint{}, fmt.Errorf("failed to unmarshal cluster_load_assigement resource from EDS response: %v", err)
 	}
-	var results []string
+	var results []xdsEndpoint
 	countPriorityZero, countPriorityOne, countPriorityOthers := 0, 0, 0
 	numBackendInPriorityZero, numBackendInPriorityOne := 0, 0
 	for _, endpoint := range clusterLoadAssignment.GetEndpoints() {
@@ -894,8 +929,19 @@ func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, er
 			countPriorityZero++
 			numBackendInPriorityZero += len(endpoint.GetLbEndpoints())
 			for _, lbendpoint := range endpoint.GetLbEndpoints() {
-				endpoint := lbendpoint.GetEndpoint().GetAddress().GetSocketAddress()
-				results = append(results, net.JoinHostPort(endpoint.GetAddress(), fmt.Sprint(endpoint.GetPortValue())))
+				primaryAddr := lbendpoint.GetEndpoint().GetAddress().GetSocketAddress()
+				var secondaryAddrStr string
+				if *enableDualstackEndpoints && lbendpoint.GetEndpoint().GetAdditionalAddresses() != nil {
+					if len(lbendpoint.GetEndpoint().GetAdditionalAddresses()) != 1 {
+						return []xdsEndpoint{}, fmt.Errorf("expected to receive zero or 1 additional address in EDS response, but received %v", len(lbendpoint.GetEndpoint().GetAdditionalAddresses()))
+					}
+					secondaryAddr := lbendpoint.GetEndpoint().GetAdditionalAddresses()[0].GetAddress().GetSocketAddress()
+					secondaryAddrStr = net.JoinHostPort(secondaryAddr.GetAddress(), fmt.Sprint(secondaryAddr.GetPortValue()))
+				}
+				results = append(results, xdsEndpoint{
+					primaryAddr:   net.JoinHostPort(primaryAddr.GetAddress(), fmt.Sprint(primaryAddr.GetPortValue())),
+					secondaryAddr: secondaryAddrStr,
+				})
 			}
 		case 1:
 			countPriorityOne++
@@ -905,13 +951,13 @@ func processEdsResponse(edsReply *v3discoverypb.DiscoveryResponse) ([]string, er
 		}
 	}
 	if countPriorityZero == 0 {
-		return []string{}, fmt.Errorf("expected to receive at least 1 endpoint with priority 0, but received %v", countPriorityZero)
+		return []xdsEndpoint{}, fmt.Errorf("expected to receive at least 1 endpoint with priority 0, but received %v", countPriorityZero)
 	}
 	if countPriorityOthers != 0 {
-		return []string{}, fmt.Errorf("received endpoint whose priority is not 0 or 1")
+		return []xdsEndpoint{}, fmt.Errorf("received endpoint whose priority is not 0 or 1")
 	}
 	if results == nil {
-		return []string{}, fmt.Errorf("no endpoints received in EDS response")
+		return []xdsEndpoint{}, fmt.Errorf("no endpoints received in EDS response")
 	}
 	infoLog.Printf("Received %v backends in the primary cluster", numBackendInPriorityZero)
 	infoLog.Printf("Received %v backends in the secondary cluster", numBackendInPriorityOne)
@@ -941,6 +987,22 @@ func newNode(zone string, ipv6Capable bool) *v3corepb.Node {
 		}
 	}
 	return ret
+}
+
+func getInstanceID(timeout time.Duration) (string, error) {
+	instanceID, err := getFromMetadata(timeout, instanceIDURL)
+	if err != nil {
+		return "", err
+	}
+	return string(instanceID), nil
+}
+
+func getProjectNumber(timeout time.Duration) (string, error) {
+	projectID, err := getFromMetadata(timeout, projectNumberURL)
+	if err != nil {
+		return "", err
+	}
+	return string(projectID), nil
 }
 
 func getZone(timeout time.Duration) (string, error) {
@@ -982,11 +1044,12 @@ func getFromMetadata(timeout time.Duration, urlStr string) ([]byte, error) {
 }
 
 func checkLDS(stream adsStream, node *v3corepb.Node, versionInfoMap, nonceMap map[string]string) (string, error) {
-	ldsReply, err := sendXdsRequest(stream, node, V3ListenerURL, *service, versionInfoMap, nonceMap)
+	resourceName := fmt.Sprintf("xdstp://traffic-director-c2p.xds.googleapis.com/envoy.config.listener.v3.Listener/%s", *service)
+	ldsReply, err := sendXdsRequest(stream, node, V3ListenerURL, resourceName, versionInfoMap, nonceMap)
 	if err != nil {
 		return "", fmt.Errorf("fail to send LDS request: %v", err)
 	}
-	clusterName, err := processLdsResponse(ldsReply)
+	clusterName, err := processLdsResponse(ldsReply, resourceName)
 	if err != nil {
 		return "", fmt.Errorf("fail to process LDS response: %v", err)
 	}
@@ -1036,33 +1099,33 @@ func checkCDS(stream adsStream, node *v3corepb.Node, clusterName string, version
 	return serviceName, nil
 }
 
-func checkEDS(stream adsStream, node *v3corepb.Node, serviceName string, versionInfoMap, nonceMap map[string]string) ([]string, error) {
+func checkEDS(stream adsStream, node *v3corepb.Node, serviceName string, versionInfoMap, nonceMap map[string]string) ([]xdsEndpoint, error) {
 	edsReply, err := sendXdsRequest(stream, node, V3EndpointsURL, serviceName, versionInfoMap, nonceMap)
 	if err != nil {
-		return []string{}, fmt.Errorf("fail to send EDS request: %v", err)
+		return []xdsEndpoint{}, fmt.Errorf("fail to send EDS request: %v", err)
 	}
 	xdsBackendAddrs, err := processEdsResponse(edsReply)
 	if err != nil {
-		return []string{}, fmt.Errorf("fail to process EDS response: %v", err)
+		return []xdsEndpoint{}, fmt.Errorf("fail to process EDS response: %v", err)
 	}
 	if len(xdsBackendAddrs) == 0 {
-		return []string{}, fmt.Errorf("no backend addresses received in EDS response: %v", err)
+		return []xdsEndpoint{}, fmt.Errorf("no backend addresses received in EDS response: %v", err)
 	}
 	return xdsBackendAddrs, nil
 }
 
-func getBackendAddrsFromTrafficDirector(addressFamily string) ([]string, error) {
+func fetchBackendAddrsFromTrafficDirector(preference addressPreference) ([]xdsEndpoint, error) {
 	// Open a RPC stream to Traffic Director
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
 	defer cancel()
 	stream, err := openAdsStream(ctx)
 	if err != nil {
-		return []string{}, fmt.Errorf("failed to open stream to Traffic Director: %v", err)
+		return []xdsEndpoint{}, fmt.Errorf("failed to open stream to Traffic Director: %v", err)
 	}
 	// Create node
 	zone, err := getZone(10 * time.Second)
 	if err != nil {
-		return []string{}, fmt.Errorf("failed to get zone from metadata server: %v", err)
+		return []xdsEndpoint{}, fmt.Errorf("failed to get zone from metadata server: %v", err)
 	}
 	var ipv6Capable bool
 	if *ipv6CapableNodeMetadataOverride != "" {
@@ -1071,15 +1134,15 @@ func getBackendAddrsFromTrafficDirector(addressFamily string) ([]string, error) 
 		} else if *ipv6CapableNodeMetadataOverride == "false" {
 			ipv6Capable = false
 		} else {
-			return []string{}, fmt.Errorf("invalid value for --ipv6_capable_node_metadata_override: %v", *ipv6CapableNodeMetadataOverride)
+			return []xdsEndpoint{}, fmt.Errorf("invalid value for --ipv6_capable_node_metadata_override: %v", *ipv6CapableNodeMetadataOverride)
 		}
 	} else {
-		if addressFamily == "IPv6" {
+		if preference == ipv6 || preference == dualstack {
 			ipv6Capable = true
-		} else if addressFamily == "IPv4" {
+		} else if preference == ipv4 {
 			ipv6Capable = false
 		} else {
-			return []string{}, fmt.Errorf("invalid address family: %v", addressFamily)
+			return []xdsEndpoint{}, fmt.Errorf("invalid address family: %s", preference)
 		}
 	}
 	node := newNode(zone, ipv6Capable)
@@ -1099,38 +1162,68 @@ func getBackendAddrsFromTrafficDirector(addressFamily string) ([]string, error) 
 	// LDS
 	clusterName, err := checkLDS(stream, node, versionInfoMap, nonceMap)
 	if err != nil {
-		return []string{}, fmt.Errorf("LDS failed: %v", err)
+		return []xdsEndpoint{}, fmt.Errorf("LDS failed: %v", err)
 	}
 	// CDS
 	serviceName, err := checkCDS(stream, node, clusterName, versionInfoMap, nonceMap)
 	if err != nil {
-		return []string{}, fmt.Errorf("CDS failed: %v", err)
+		return []xdsEndpoint{}, fmt.Errorf("CDS failed: %v", err)
 	}
 	// EDS
 	xdsBackendAddrs, err := checkEDS(stream, node, serviceName, versionInfoMap, nonceMap)
 	if err != nil {
-		return []string{}, fmt.Errorf("EDS failed: %v", err)
+		return []xdsEndpoint{}, fmt.Errorf("EDS failed: %v", err)
 	}
 	for _, backend := range xdsBackendAddrs {
 		// check if the backend address is of the expected address family
-		if addressFamily == "IPv4" {
-			ip, err := parseAddress(backend)
+		if preference == ipv4 {
+			ip, err := parseAddress(backend.primaryAddr)
 			if err != nil {
-				return []string{}, fmt.Errorf("failed to parse backend address %v: %v", backend, err)
+				return []xdsEndpoint{}, fmt.Errorf("failed to parse backend address %v: %v", backend, err)
 			}
 			if ip.To4() == nil {
-				return []string{}, fmt.Errorf("backend address %v is not IPv4", backend)
+				return []xdsEndpoint{}, fmt.Errorf("backend address %v is not IPv4", backend)
 			}
-		} else if addressFamily == "IPv6" {
-			ip, err := parseAddress(backend)
+			if backend.secondaryAddr != "" {
+				return []xdsEndpoint{}, fmt.Errorf("backend address %v has a unexpected secondary address", backend)
+			}
+			infoLog.Printf("Found %s backend address from Traffic Director: |%s|", preference, backend.primaryAddr)
+		} else if preference == ipv6 {
+			ip, err := parseAddress(backend.primaryAddr)
 			if err != nil {
-				return []string{}, fmt.Errorf("failed to parse backend address %v: %v", backend, err)
+				return []xdsEndpoint{}, fmt.Errorf("failed to parse backend address %v: %v", backend, err)
 			}
 			if ip.To4() != nil {
-				return []string{}, fmt.Errorf("backend address %v is not IPv6", backend)
+				return []xdsEndpoint{}, fmt.Errorf("backend address %v is not IPv6", backend)
 			}
+			if backend.secondaryAddr != "" {
+				return []xdsEndpoint{}, fmt.Errorf("backend address %v has a unexpected secondary address", backend)
+			}
+			infoLog.Printf("Found %s backend address from Traffic Director: |%s|", preference, backend.primaryAddr)
+		} else if preference == dualstack {
+			// Dualstack endpoints enabled. We'll either have an IPv6 primary address and IPv4 secondary,
+			// or an IPv6 primary and no secondary.
+			ip, err := parseAddress(backend.primaryAddr)
+			if err != nil {
+				return []xdsEndpoint{}, fmt.Errorf("failed to parse backend address %v: %v", backend, err)
+			}
+			if ip.To4() != nil {
+				return []xdsEndpoint{}, fmt.Errorf("backend address %v, primary address is not IPv6", backend)
+			}
+			infoLog.Printf("Found IPv6 backend address from Traffic Director: |%s|", backend.primaryAddr)
+			if backend.secondaryAddr != "" {
+				ip, err := parseAddress(backend.secondaryAddr)
+				if err != nil {
+					return []xdsEndpoint{}, fmt.Errorf("failed to parse backend address %v: %v", backend, err)
+				}
+				if ip.To4() == nil {
+					return []xdsEndpoint{}, fmt.Errorf("backend address %v, secondary address is not IPv4", backend)
+				}
+				infoLog.Printf("Found IPv4 backend address from Traffic Director: |%s|", backend.secondaryAddr)
+			}
+		} else {
+			return []xdsEndpoint{}, fmt.Errorf("invalid address family: %s", preference)
 		}
-		infoLog.Printf("Found %v backend address from Traffic Director: |%v|", addressFamily, backend)
 	}
 	return xdsBackendAddrs, nil
 }
@@ -1158,6 +1251,16 @@ func parseAddress(address string) (net.IP, error) {
 
 func main() {
 	flag.Parse()
+	if instanceID, err := getInstanceID(2 * time.Second); err != nil {
+		infoLog.Printf("Failed to fetch VM instance ID from metadata server: %v", err)
+	} else {
+		infoLog.Printf("VM instance ID: %s", instanceID)
+	}
+	if projectID, err := getProjectNumber(2 * time.Second); err != nil {
+		infoLog.Printf("Failed to fetch VM project number from metadata server: %v", err)
+	} else {
+		infoLog.Printf("VM project number: %s", projectID)
+	}
 	infoLog.Printf("Running dp_check: service=%s, ipv4_only=%v, ipv6_only=%v, ipv4_and_v6=%v, check_grpclb=%v, check_xds=%v, td_endpoint=%s, xds_expect_fallback_configured=%v\n", *service, *ipv4Only, *ipv6Only, *ipv4AndV6, *checkGrpclb, *checkXds, *trafficDirectorHostname, *xdsExpectFallbackConfigured)
 	maybeOverrideFlags()
 	if len(*service) == 0 {
@@ -1544,38 +1647,76 @@ this indicates a possible bug that may be causing a larger outage`, balancerHost
 
 	// xds
 	var xdsIPv6BackendAddrs []string
-	runCheck("Get IPv6 backend addresses from Traffic Director", func() error {
-		if skipXdsErr != nil {
-			return &skipCheckError{err: skipXdsErr}
-		}
-		if skipIPv6Err != nil {
-			return &skipCheckError{err: skipIPv6Err}
-		}
-		if *backendAddressOverride != "" {
-			xdsIPv6BackendAddrs = []string{*backendAddressOverride}
-			return &skipCheckError{err: errors.New("skipping xds IPv6 backend address discovery because --backend_address_override is set")}
-		}
-		var err error
-		xdsIPv6BackendAddrs, err = getBackendAddrsFromTrafficDirector("IPv6")
-		return err
-	})
-
 	var xdsIPv4BackendAddrs []string
-	runCheck("Get IPv4 backend addresses from Traffic Director", func() error {
-		if skipXdsErr != nil {
-			return &skipCheckError{err: skipXdsErr}
-		}
-		if skipIPv4Err != nil {
-			return &skipCheckError{err: skipIPv4Err}
-		}
-		if *backendAddressOverride != "" {
-			xdsIPv4BackendAddrs = []string{*backendAddressOverride}
-			return &skipCheckError{err: errors.New("skipping xds IPv4 backend address discovery because --backend_address_override is set")}
-		}
-		var err error
-		xdsIPv4BackendAddrs, err = getBackendAddrsFromTrafficDirector("IPv4")
-		return err
-	})
+	if *enableDualstackEndpoints {
+		runCheck("Get backend addresses from Traffic Director", func() error {
+			if skipXdsErr != nil {
+				return &skipCheckError{err: skipXdsErr}
+			}
+			if *backendAddressOverride != "" {
+				// we'll figure out which address family to use later based on command-line flags
+				xdsIPv6BackendAddrs = []string{*backendAddressOverride}
+				xdsIPv4BackendAddrs = []string{*backendAddressOverride}
+				return &skipCheckError{err: errors.New("skipping xds backend address discovery because --backend_address_override is set")}
+			}
+			endpoints, err := fetchBackendAddrsFromTrafficDirector(dualstack)
+			if err != nil {
+				return err
+			}
+			for _, endpoint := range endpoints {
+				xdsIPv6BackendAddrs = append(xdsIPv6BackendAddrs, endpoint.primaryAddr)
+				if endpoint.secondaryAddr == "" {
+					if !*ipv6Only {
+						return fmt.Errorf("backend endpoint %v is missing IPv4 secondary address", endpoint)
+					}
+					continue
+				}
+				xdsIPv4BackendAddrs = append(xdsIPv4BackendAddrs, endpoint.secondaryAddr)
+			}
+			return nil
+		})
+	} else {
+		runCheck("Get IPv6 backend addresses from Traffic Director", func() error {
+			if skipXdsErr != nil {
+				return &skipCheckError{err: skipXdsErr}
+			}
+			if skipIPv6Err != nil {
+				return &skipCheckError{err: skipIPv6Err}
+			}
+			if *backendAddressOverride != "" {
+				xdsIPv6BackendAddrs = []string{*backendAddressOverride}
+				return &skipCheckError{err: errors.New("skipping xds IPv6 backend address discovery because --backend_address_override is set")}
+			}
+			endpoints, err := fetchBackendAddrsFromTrafficDirector(ipv6)
+			if err != nil {
+				return err
+			}
+			for _, endpoint := range endpoints {
+				xdsIPv6BackendAddrs = append(xdsIPv6BackendAddrs, endpoint.primaryAddr)
+			}
+			return nil
+		})
+		runCheck("Get IPv4 backend addresses from Traffic Director", func() error {
+			if skipXdsErr != nil {
+				return &skipCheckError{err: skipXdsErr}
+			}
+			if skipIPv4Err != nil {
+				return &skipCheckError{err: skipIPv4Err}
+			}
+			if *backendAddressOverride != "" {
+				xdsIPv4BackendAddrs = []string{*backendAddressOverride}
+				return &skipCheckError{err: errors.New("skipping xds IPv4 backend address discovery because --backend_address_override is set")}
+			}
+			endpoints, err := fetchBackendAddrsFromTrafficDirector(ipv4)
+			if err != nil {
+				return err
+			}
+			for _, endpoint := range endpoints {
+				xdsIPv4BackendAddrs = append(xdsIPv4BackendAddrs, endpoint.primaryAddr)
+			}
+			return nil
+		})
+	}
 	runCheck("Local IPv6 routes", func() error {
 		if skipIPv6Err != nil {
 			return &skipCheckError{err: skipIPv6Err}
